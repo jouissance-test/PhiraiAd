@@ -19,7 +19,8 @@ fn main() {
     let slider = &source[source.find("    pub fn practice_speed_slider(").unwrap()..source.find("    pub fn hgrids(").unwrap()];
     let clicked = &source[source.find("    fn clicked(").unwrap()..source.find("    pub fn accent(").unwrap()];
     let button = &source[source.find("    pub fn button(").unwrap()..source.find("    pub fn checkbox(").unwrap()];
-    std::fs::write(out.join("practice_slider.rs"), format!("impl Ui {{\n{slider}\n{clicked}\n{button}\n}}\n")).unwrap();
+    let checkbox = &source[source.find("    pub fn checkbox(").unwrap()..source.find("    pub fn input<").unwrap()];
+    std::fs::write(out.join("practice_slider.rs"), format!("impl Ui {{\n{slider}\n{clicked}\n{button}\n{checkbox}\n}}\n")).unwrap();
     let path = "../../prpr/src/ui/chart_play_editor.rs";
     println!("cargo:rerun-if-changed={path}");
     let code = std::fs::read_to_string(path).unwrap();
@@ -53,14 +54,18 @@ fn main() {
     let path = "../../prpr/src/core/line.rs";
     println!("cargo:rerun-if-changed={path}");
     let code = std::fs::read_to_string(path).unwrap();
-    let code = &code[code.find("#[derive(Clone)]\npub struct JudgeLineCache").unwrap()..code.find("pub struct JudgeLine {").unwrap()];
+    let cache = code.find("pub struct JudgeLineCache").unwrap();
+    let cache = code[..cache].rfind("#[derive(Clone)]").unwrap();
+    let code = &code[cache..code.find("pub struct JudgeLine {").unwrap()];
     std::fs::write(out.join("line_cache.rs"), code).unwrap();
     // Exercise the production end-of-run record gate, not a copy of its policy.
     let path = "../../prpr/src/scene/game.rs";
     println!("cargo:rerun-if-changed={path}");
     let source = std::fs::read_to_string(path).unwrap();
     let record = &source[source.find("#[derive(Clone, Debug, Serialize, Deserialize)]").unwrap()..source.find("fn fmt_time(").unwrap()];
-    let mode = &source[source.find("#[derive(PartialEq, Eq)]").unwrap()..source.find("#[derive(Clone)]\nenum State").unwrap()];
+    let state = source.find("enum State").unwrap();
+    let state = source[..state].rfind("#[derive(Clone)]").unwrap();
+    let mode = &source[source.find("#[derive(PartialEq, Eq)]").unwrap()..state];
     let pause = &source[source.find("    /// All button/automatic pauses").unwrap()..source.find("    fn sync_auto_flip(").unwrap()];
     std::fs::write(out.join("pause_resume.rs"), format!("impl GameScene {{ {pause} }}")).unwrap();
     let begin = source.find("                    let result = self.judge.result();").unwrap();

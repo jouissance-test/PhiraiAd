@@ -87,3 +87,12 @@ Phira、Phigros 以及相关名称、音乐、曲绘、谱面和其他资源的�
 
 
 
+
+## 开发者参考
+
+开发工具路径清单与架构图 Mermaid 源码见 [docs/agent-reference/](docs/agent-reference/)。
+
+## 开发者参考
+
+开发工具路径清单与架构图 Mermaid 源码见 [docs/agent-reference/](docs/agent-reference/)。
+

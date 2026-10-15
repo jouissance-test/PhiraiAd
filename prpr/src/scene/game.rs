@@ -12,7 +12,8 @@ use crate::practice_audio::Music;
 use crate::{
     bin::BinaryReader,
     config::{
-        Config, Mods, NOTE_FLOW_SPEED_MAX, NOTE_FLOW_SPEED_MIN, NOTE_FLOW_SPEED_STEP, PLAYBACK_SPEED_MAX, PLAYBACK_SPEED_MIN, PLAYBACK_SPEED_STEP,
+        Config, Mods, FIXED_PREVIEW_TIME_MAX, FIXED_PREVIEW_TIME_MIN, FIXED_PREVIEW_TIME_STEP, NOTE_FLOW_SPEED_MAX, NOTE_FLOW_SPEED_MIN,
+        NOTE_FLOW_SPEED_STEP, PLAYBACK_SPEED_MAX, PLAYBACK_SPEED_MIN, PLAYBACK_SPEED_STEP,
     },
     core::{copy_fbo, BadNote, Chart, ChartExtra, Effect, Matrix, Point, Resource, UIElement, Vector, PGR_FONT},
     ext::{parse_time, screen_aspect, semi_white, RectExt, SafeTexture, ScaleType},
@@ -125,6 +126,20 @@ pub enum ChallengeEvent {
     Aborted,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FixedPreviewKey {
+    seconds: f32,
+    playback_rate: f32,
+    aspect_ratio: f32,
+    viewport: (i32, i32, i32, i32),
+    practice_view: crate::practice_view::PracticeView,
+    note_width: f32,
+    flip_x: bool,
+    double_hint: bool,
+    hold_compact: bool,
+    shorten_holds: bool,
+}
+
 pub struct GameScene {
     should_exit: bool,
     next_scene: Option<NextScene>,
@@ -153,6 +168,7 @@ pub struct GameScene {
     exercise_judgement_percent: f32,
     exercise_judgement_locked: bool,
     exercise_extra_open: bool,
+    fixed_preview_key: Option<FixedPreviewKey>,
 
     pub music: Music,
     noise_renderer: Option<crate::noise_area::render::NoiseRenderer>,
@@ -459,6 +475,7 @@ impl GameScene {
             exercise_judgement_percent: 100.,
             exercise_judgement_locked: false,
             exercise_extra_open: false,
+            fixed_preview_key: None,
 
             music,
             noise_renderer,
@@ -826,6 +843,43 @@ impl GameScene {
         }
         self.res.config.practice_judgement_multiplier = self.practice_judgement_multiplier();
         self.res.note_flow_speed = self.effective_note_flow_speed();
+    }
+
+    fn fixed_preview_supported(&self) -> bool {
+        !self.res.replay_view && matches!(self.mode, GameMode::Normal | GameMode::NoRetry | GameMode::Exercise | GameMode::TweakOffset)
+    }
+
+    fn sync_fixed_preview(&mut self) {
+        let key = (self.fixed_preview_supported() && self.res.config.fixed_preview_time_enabled).then(|| FixedPreviewKey {
+            seconds: self.res.config.fixed_preview_seconds(),
+            playback_rate: self.res.config.speed,
+            aspect_ratio: self.res.aspect_ratio,
+            viewport: self.res.last_vp,
+            practice_view: self.res.practice_view,
+            note_width: self.res.note_width,
+            flip_x: self.res.config.flip_x(),
+            double_hint: self.res.config.double_hint,
+            hold_compact: self.res.res_pack.info.hold_compact,
+            shorten_holds: self.res.config.shorten_holds,
+        });
+        if key == self.fixed_preview_key {
+            return;
+        }
+        self.fixed_preview_key = key;
+        let Some(key) = key else {
+            self.res.fixed_preview_chart_time = None;
+            self.chart.clear_fixed_preview();
+            return;
+        };
+        let preview_chart_seconds = key.seconds as f64 * key.playback_rate as f64;
+        if !preview_chart_seconds.is_finite() || preview_chart_seconds <= 0. {
+            self.res.fixed_preview_chart_time = None;
+            self.chart.clear_fixed_preview();
+            return;
+        }
+        self.res.fixed_preview_chart_time = Some(preview_chart_seconds);
+        let stats = self.chart.rebuild_fixed_preview(&self.res, preview_chart_seconds);
+        tracing::info!(solved = stats.solved, fallback = stats.fallback, preview_real_seconds = key.seconds, playback_rate = key.playback_rate, "fixed preview cache rebuilt");
     }
 
     fn report_mode(&self) -> Option<ReportGameMode> {
@@ -1198,7 +1252,7 @@ impl GameScene {
     }
 
     fn overlay_ui_absolute(&mut self, ui: &mut Ui, tm: &mut TimeManager) -> Result<()> {
-        if !tm.paused() || self.mode != GameMode::Exercise {
+        if !tm.paused() {
             Ui::clear_practice_speed_drag();
         }
         if self.res.replay_view || self.mode == GameMode::EditChartPlay || self.auto_flip.rotating() {
@@ -1209,6 +1263,7 @@ impl GameScene {
         let mut practice_settings_changed = false;
         let mut retry_requested = None;
         let mut resume_requested = false;
+        let fixed_preview_supported = self.fixed_preview_supported();
         let res = &mut self.res;
         if tm.paused() {
             let h = 1. / res.aspect_ratio;
@@ -1285,6 +1340,33 @@ impl GameScene {
                     _ => {}
                 }
             }
+            if fixed_preview_supported {
+                let previous_fixed_preview = (res.config.fixed_preview_time_enabled, res.config.fixed_preview_time);
+                ui.scope(|ui| {
+                    let (x, y) = crate::practice_view::fixed_preview_panel_origin(self.mode == GameMode::Exercise);
+                    ui.dx(x);
+                    ui.dy(y);
+                    ui.with(Matrix::new_scaling(crate::practice_view::fixed_preview_panel_scale(self.mode == GameMode::Exercise)), |ui| {
+                        ui.checkbox_with_id("fixed_preview_enabled", "统一预判时间", &mut res.config.fixed_preview_time_enabled);
+                        ui.dy(0.075);
+                        ui.practice_speed_slider(
+                            "fixed_preview_time",
+                            "预判时间",
+                            FIXED_PREVIEW_TIME_MIN..FIXED_PREVIEW_TIME_MAX,
+                            FIXED_PREVIEW_TIME_STEP,
+                            &mut res.config.fixed_preview_time,
+                            Some(0.40),
+                        );
+                    });
+                });
+                res.config.fixed_preview_time = res.config.fixed_preview_seconds();
+                if previous_fixed_preview != (res.config.fixed_preview_time_enabled, res.config.fixed_preview_time) {
+                    if let Err(error) = crate::fixed_preview::save_preference(res.config.fixed_preview_time_enabled, res.config.fixed_preview_time) {
+                        (res.config.fixed_preview_time_enabled, res.config.fixed_preview_time) = previous_fixed_preview;
+                        show_message(format!("{error:#}")).error();
+                    }
+                }
+            }
             if self.mode == GameMode::Exercise {
                 let previous_playback_speed = self.res.config.speed;
                 let previous_manual_note_flow_speed = self.exercise_note_flow_speed;
@@ -1357,22 +1439,43 @@ impl GameScene {
                     ui.dy(0.165);
                     let mut displayed = self.practice_note_flow_speed();
                     let previous = displayed;
-                    ui.practice_speed_slider(
-                        "exercise_note_flow",
-                        tl!("note-flow-speed"),
-                        NOTE_FLOW_SPEED_MIN..NOTE_FLOW_SPEED_MAX,
-                        NOTE_FLOW_SPEED_STEP,
-                        &mut displayed,
-                        Some(0.46),
-                    );
-                    if (displayed - previous).abs() > f32::EPSILON {
+                    if self.res.config.fixed_preview_time_enabled {
+                        ui.disabled(|ui| {
+                            ui.practice_speed_slider(
+                                "exercise_note_flow",
+                                tl!("note-flow-speed"),
+                                NOTE_FLOW_SPEED_MIN..NOTE_FLOW_SPEED_MAX,
+                                NOTE_FLOW_SPEED_STEP,
+                                &mut displayed,
+                                Some(0.46),
+                            );
+                        });
+                        displayed = previous;
+                    } else {
+                        ui.practice_speed_slider(
+                            "exercise_note_flow",
+                            tl!("note-flow-speed"),
+                            NOTE_FLOW_SPEED_MIN..NOTE_FLOW_SPEED_MAX,
+                            NOTE_FLOW_SPEED_STEP,
+                            &mut displayed,
+                            Some(0.46),
+                        );
+                    }
+                    if !self.res.config.fixed_preview_time_enabled && (displayed - previous).abs() > f32::EPSILON {
                         self.exercise_note_flow_speed = displayed;
                         self.exercise_note_flow_locked = false;
                     }
                     ui.scope(|ui| {
                         ui.dx(0.40);
                         ui.with(Matrix::new_scaling(0.65), |ui| {
-                            ui.checkbox_with_id("exercise_note_flow_inverse", "速度的倒数", &mut self.exercise_note_flow_locked);
+                            if self.res.config.fixed_preview_time_enabled {
+                                let mut displayed = self.exercise_note_flow_locked;
+                                ui.disabled(|ui| {
+                                    ui.checkbox_with_id("exercise_note_flow_inverse", "速度的倒数", &mut displayed);
+                                });
+                            } else {
+                                ui.checkbox_with_id("exercise_note_flow_inverse", "速度的倒数", &mut self.exercise_note_flow_locked);
+                            }
                         });
                     });
                     ui.dy(0.165);
@@ -2161,6 +2264,23 @@ impl Scene for GameScene {
         if let Some((id, text)) = take_input() {
             let offset = self.offset().min(0.);
             match id.as_str() {
+                "fixed_preview_time" => {
+                    if self.fixed_preview_supported() && tm.paused() {
+                        if let Ok(value) = text.trim().trim_end_matches('s').trim().parse::<f32>() {
+                            if value.is_finite() && (FIXED_PREVIEW_TIME_MIN..=FIXED_PREVIEW_TIME_MAX).contains(&value) {
+                                let old = self.res.config.fixed_preview_time;
+                                self.res.config.fixed_preview_time = value;
+                                if let Err(error) = crate::fixed_preview::save_preference(
+                                    self.res.config.fixed_preview_time_enabled,
+                                    self.res.config.fixed_preview_time,
+                                ) {
+                                    self.res.config.fixed_preview_time = old;
+                                    show_message(format!("{error:#}")).error();
+                                }
+                            }
+                        }
+                    }
+                }
                 "exercise_speed" | "exercise_note_flow" => {
                     // Inputs belong to a paused practice run; ignore late results after leaving it.
                     if self.mode == GameMode::Exercise && tm.paused() {
@@ -2294,11 +2414,12 @@ impl Scene for GameScene {
                 .res
                 .practice_view
                 .needs_expanded_view(self.res.camera.viewport.map_or(ui.viewport.2, |vp| vp.2) as f32, self.res.aspect_ratio);
-        let res = &mut self.res;
         let asp = ui.viewport.2 as f32 / ui.viewport.3 as f32;
-        if res.update_size(ui.viewport) || self.mode == GameMode::View {
-            set_camera(&res.camera);
+        if self.res.update_size(ui.viewport) || self.mode == GameMode::View {
+            set_camera(&self.res.camera);
         }
+        self.sync_fixed_preview();
+        let res = &mut self.res;
 
         let msaa = res.config.sample_count > 1;
 

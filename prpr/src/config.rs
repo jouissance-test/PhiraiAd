@@ -11,6 +11,10 @@ pub const PLAYBACK_SPEED_STEP: f32 = 0.05;
 pub const NOTE_FLOW_SPEED_MIN: f32 = 0.1;
 pub const NOTE_FLOW_SPEED_MAX: f32 = 20.0;
 pub const NOTE_FLOW_SPEED_STEP: f32 = 0.05;
+pub const FIXED_PREVIEW_TIME_MIN: f32 = 0.1;
+pub const FIXED_PREVIEW_TIME_MAX: f32 = 5.0;
+pub const FIXED_PREVIEW_TIME_STEP: f32 = 0.001;
+pub const FIXED_PREVIEW_TIME_DEFAULT: f32 = 0.45;
 pub const JUDGEMENT_RANGE_HORIZON_MIN: f32 = 0.1;
 pub const JUDGEMENT_RANGE_HORIZON_MAX: f32 = 30.0;
 pub const JUDGEMENT_RANGE_HORIZON_STEP: f32 = 0.1;
@@ -234,6 +238,10 @@ pub struct Config {
     pub note_scale: f32,
     /// Global visual flow multiplier, edited from any chart Mods panel.
     pub note_flow_speed: f32,
+    /// Keep each real-time Note's viewport-entry lead time approximately fixed.
+    pub fixed_preview_time_enabled: bool,
+    /// Requested wall-clock lead time in seconds.
+    pub fixed_preview_time: f32,
     pub offline_mode: bool,
     pub offset: f32,
     pub particle: bool,
@@ -302,6 +310,8 @@ impl Default for Config {
             mp_enabled: false,
             note_scale: 1.0,
             note_flow_speed: 1.,
+            fixed_preview_time_enabled: false,
+            fixed_preview_time: FIXED_PREVIEW_TIME_DEFAULT,
             offline_mode: false,
             fullscreen_mode: false,
             offset: 0.,
@@ -443,10 +453,19 @@ impl Config {
         self.global_note_flow_speed() * practice_multiplier
     }
 
+    pub fn fixed_preview_seconds(&self) -> f32 {
+        if self.fixed_preview_time.is_finite() {
+            self.fixed_preview_time.clamp(FIXED_PREVIEW_TIME_MIN, FIXED_PREVIEW_TIME_MAX)
+        } else {
+            FIXED_PREVIEW_TIME_DEFAULT
+        }
+    }
+
     pub fn init(&mut self) {
         // Removed split-Flick and online-local switches deserialize as ignored legacy keys.
         self.speed = if self.speed.is_finite() { self.speed.clamp(0.5, 2.) } else { 1. };
         self.note_flow_speed = self.global_note_flow_speed();
+        self.fixed_preview_time = self.fixed_preview_seconds();
         self.judgement_range_debug.horizon = self
             .judgement_range_debug
             .horizon
@@ -635,19 +654,27 @@ mod challenge_tests {
 
 #[cfg(test)]
 mod speed_tests {
-    use super::Config;
+    use super::{Config, FIXED_PREVIEW_TIME_DEFAULT};
 
     #[test]
     fn playback_and_global_flow_preferences_persist_across_loading() {
-        let mut config: Config = serde_json::from_str(r#"{"speed":0.75,"noteFlowSpeed":1.5}"#).unwrap();
+        let mut config: Config =
+            serde_json::from_str(r#"{"speed":0.75,"noteFlowSpeed":1.5,"fixedPreviewTimeEnabled":true,"fixedPreviewTime":2.4}"#).unwrap();
         config.init();
         assert_eq!(config.speed, 0.75);
         assert_eq!(config.note_flow_speed, 1.5);
+        assert!(config.fixed_preview_time_enabled);
+        assert_eq!(config.fixed_preview_time, 2.4);
         let mut restored: Config = serde_json::from_slice(&serde_json::to_vec(&config).unwrap()).unwrap();
         restored.init();
         assert_eq!(restored.speed, 0.75);
         assert_eq!(restored.note_flow_speed, 1.5);
-        assert_eq!(serde_json::from_str::<Config>("{}").unwrap().note_flow_speed, 1.);
+        assert!(restored.fixed_preview_time_enabled);
+        assert_eq!(restored.fixed_preview_time, 2.4);
+        let defaults = serde_json::from_str::<Config>("{}").unwrap();
+        assert_eq!(defaults.note_flow_speed, 1.);
+        assert!(!defaults.fixed_preview_time_enabled);
+        assert_eq!(defaults.fixed_preview_time, FIXED_PREVIEW_TIME_DEFAULT);
     }
 
     #[test]
@@ -670,15 +697,21 @@ mod speed_tests {
 
     #[test]
     fn invalid_speed_preferences_are_sanitized() {
-        for (playback, flow, expected_playback, expected_flow) in [(f32::NAN, f32::INFINITY, 1., 1.), (0., -1., 0.5, 0.1), (100., 100., 2., 5.)] {
+        for (playback, flow, preview, expected_playback, expected_flow, expected_preview) in [
+            (f32::NAN, f32::INFINITY, f32::NAN, 1., 1., FIXED_PREVIEW_TIME_DEFAULT),
+            (0., -1., 0., 0.5, 0.1, 0.1),
+            (100., 100., 100., 2., 5., 5.),
+        ] {
             let mut config = Config {
                 speed: playback,
                 note_flow_speed: flow,
+                fixed_preview_time: preview,
                 ..Default::default()
             };
             config.init();
             assert_eq!(config.speed, expected_playback);
             assert_eq!(config.note_flow_speed, expected_flow);
+            assert_eq!(config.fixed_preview_time, expected_preview);
         }
     }
 }

@@ -12,6 +12,7 @@ impl Rect {
     fn new(x:f32,y:f32,w:f32,h:f32)->Self{Self{x,y,w,h}}
     fn feather(self,d:f32)->Self{Self::new(self.x-d,self.y-d,self.w+2.*d,self.h+2.*d)}
     fn right(self)->f32{self.x+self.w}
+    fn bottom(self)->f32{self.y+self.h}
     fn rounded(self,_:f32)->Self{self}
     fn center(self)->Vec2{Vec2{x:self.x+self.w/2.,y:self.y+self.h/2.}}
     fn contains(self,p:Vec2)->bool{p.x>=self.x&&p.x<=self.x+self.w&&p.y>=self.y&&p.y<=self.y+self.h}
@@ -140,5 +141,27 @@ fn coordinate_slider_endpoints_and_center() {
         ui.practice_value_slider("exercise_view_x", "X", practice_view::CENTER, &mut value, Some(0.4));
         assert_eq!(value, expected);
         Ui::clear_practice_speed_drag();
+    }
+}
+
+#[test]
+fn checked_box_has_an_explicit_check_mark() {
+    let mut ui = Ui::default();
+    let mut checked = true;
+    ui.checkbox_with_id("fixed_preview_enabled", "Fixed Preview", &mut checked);
+    assert!(ui.texts.iter().any(|text| text == "✓"));
+}
+
+#[test]
+fn fixed_preview_panel_leaves_the_timeline_text_column_clear() {
+    let (left, right) = practice_view::fixed_preview_panel_horizontal_bounds(true);
+    assert!(left >= -1.0, "panel must remain on-screen: {left}");
+    assert!(right <= -0.5, "panel intrudes into the centered timeline labels: {right}");
+    let (top, bottom) = practice_view::fixed_preview_panel_vertical_bounds(true);
+    for (screen_height, viewport_width) in [(1080., 1920.), (1080., 2400.)] {
+        let aspect = viewport_width / screen_height;
+        let timeline_bottom = practice_view::timeline_position(screen_height, viewport_width) + 0.06;
+        assert!(top >= timeline_bottom + 0.02, "panel overlaps the timeline bar at {aspect}: {top} < {timeline_bottom}");
+        assert!(bottom <= 1. / aspect - 0.005, "panel leaves the viewport at {aspect}: {bottom}");
     }
 }

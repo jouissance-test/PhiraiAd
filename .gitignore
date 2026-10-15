@@ -33,6 +33,7 @@ inner.rs
 # Test
 
 /test
+/tests/chart-play/target/
 /log*
 /build_event_debug.sh
 

@@ -16,8 +16,9 @@ use macroquad::prelude::*;
 use once_cell::sync::Lazy;
 use prpr::{
     config::{
-        JudgementMode, JudgementRangeAnchor, JUDGEMENT_RANGE_ALPHA_MAX, JUDGEMENT_RANGE_ALPHA_MIN, JUDGEMENT_RANGE_ALPHA_STEP,
-        JUDGEMENT_RANGE_HORIZON_MAX, JUDGEMENT_RANGE_HORIZON_MIN, JUDGEMENT_RANGE_HORIZON_STEP,
+        JudgementMode, JudgementRangeAnchor, FIXED_PREVIEW_TIME_MAX, FIXED_PREVIEW_TIME_MIN, FIXED_PREVIEW_TIME_STEP,
+        JUDGEMENT_RANGE_ALPHA_MAX, JUDGEMENT_RANGE_ALPHA_MIN, JUDGEMENT_RANGE_ALPHA_STEP, JUDGEMENT_RANGE_HORIZON_MAX,
+        JUDGEMENT_RANGE_HORIZON_MIN, JUDGEMENT_RANGE_HORIZON_STEP,
     },
     core::BOLD_FONT,
     ext::{open_url, poll_future, semi_white, LocalTask, RectExt, SafeTexture},
@@ -854,6 +855,8 @@ struct ChartList {
     replay_recording_btn: DRectButton,
     normal_preserve_pitch_btn: DRectButton,
     normal_note_flow_inverse_btn: DRectButton,
+    fixed_preview_btn: DRectButton,
+    fixed_preview_slider: Slider,
     fullscreen_judge_btn: DRectButton,
     fullscreen_score_btn: DRectButton,
     show_acc_btn: DRectButton,
@@ -893,6 +896,8 @@ impl ChartList {
             replay_recording_btn: DRectButton::new(),
             normal_preserve_pitch_btn: DRectButton::new(),
             normal_note_flow_inverse_btn: DRectButton::new(),
+            fixed_preview_btn: DRectButton::new(),
+            fixed_preview_slider: Slider::new(FIXED_PREVIEW_TIME_MIN..FIXED_PREVIEW_TIME_MAX, FIXED_PREVIEW_TIME_STEP),
             fullscreen_judge_btn: DRectButton::new(),
             fullscreen_score_btn: DRectButton::new(),
             show_acc_btn: DRectButton::new(),
@@ -932,8 +937,11 @@ impl ChartList {
             return Ok(Some(true));
         }
         if self.replica && self.normal_note_flow_inverse_btn.touch(touch, t) {
-            config.normal_note_flow_inverse ^= true;
-            return Ok(Some(true));
+            if !config.fixed_preview_time_enabled {
+                config.normal_note_flow_inverse ^= true;
+                return Ok(Some(true));
+            }
+            return Ok(Some(false));
         }
         if self.replica && self.replay_recording_btn.touch(touch, t) {
             config.replay_recording_enabled ^= true;
@@ -994,7 +1002,15 @@ impl ChartList {
             config.use_keyboard ^= true;
             return Ok(Some(true));
         }
+        if !self.replica && self.fixed_preview_btn.touch(touch, t) {
+            config.fixed_preview_time_enabled ^= true;
+            return Ok(Some(true));
+        }
         if !self.replica {
+            if let wt @ Some(_) = self.fixed_preview_slider.touch(touch, t, &mut config.fixed_preview_time) {
+                config.fixed_preview_time = config.fixed_preview_seconds();
+                return Ok(wt);
+            }
             if let wt @ Some(_) = self.speed_slider.touch(touch, t, &mut config.speed) {
                 return Ok(wt);
             }
@@ -1127,6 +1143,14 @@ impl ChartList {
         }
         if !self.replica {
             item! { w;
+                render_partition_title(ui, w, self.replica, Cow::Borrowed("统一预判时间"), Some(Cow::Borrowed("按现实时间统一音符进入视野到判定的时长")));
+                render_switch(ui, rr, t, &mut self.fixed_preview_btn, config.fixed_preview_time_enabled);
+            }
+            item! { w;
+                render_partition_title(ui, w, self.replica, Cow::Borrowed("目标预判时间"), None);
+                self.fixed_preview_slider.render(ui, rr, t, config.fixed_preview_seconds(), format!("{:.3}s", config.fixed_preview_seconds()));
+            }
+            item! { w;
                 render_partition_title(ui, w, self.replica, tl!("item-speed"), None);
                 self.speed_slider.render(ui, rr, t, config.speed, format!("{:.2}", config.speed));
             }
@@ -1168,7 +1192,11 @@ impl ChartList {
             }
             item! { w;
                 render_partition_title(ui, w, true, Cow::Borrowed("为非练习模式开启流速设为速度的倒数"), None);
-                render_switch(ui, rr, t, &mut self.normal_note_flow_inverse_btn, config.normal_note_flow_inverse);
+                if config.fixed_preview_time_enabled {
+                    ui.alpha(0.35, |ui| render_switch(ui, rr, t, &mut self.normal_note_flow_inverse_btn, config.normal_note_flow_inverse));
+                } else {
+                    render_switch(ui, rr, t, &mut self.normal_note_flow_inverse_btn, config.normal_note_flow_inverse);
+                }
             }
             self.judge_mode_btn.render_top(ui, t, 1.);
         }

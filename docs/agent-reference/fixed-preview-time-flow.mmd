@@ -1,0 +1,23 @@
+flowchart TD
+    UI["全局设置 + 暂停菜单<br/>覆盖共用实时游戏场景的单谱模式"] --> Config["全局 Fixed Preview Time 偏好<br/>默认关闭；开启后暂停修改立即生效"]
+    Config --> GS["实时游戏场景 / GameScene<br/>配置同步与逐 Note 缓存失效"]
+
+    GS --> Conv["按当前模式有效播放倍率换算<br/>目标谱面秒 = 目标真实秒 × playback rate"]
+    Conv --> Target["目标采样时刻<br/>Note 判定时刻 - 目标谱面秒"]
+
+    Chart["Chart / JudgeLine<br/>谱面、speed event、Note"] --> Solver["逐 Note 预计算视觉倍率<br/>Note 几何首次与 viewport 相交"]
+    Target --> Solver
+    View["Resource / 当前 viewport 与 camera<br/>坐标变换和可见区域"] --> Solver
+
+    Solver --> Cache["缓存逐 Note flow"]
+    Cache --> Note["Note 渲染变换<br/>读取对应 flow"]
+    Note --> Hold["Hold 头、身体、尾部<br/>复用同一 Note flow"]
+
+    Note --> Cull["JudgeLine 全局倍率 early-break<br/>首版启用功能时关闭"]
+    Note --> Guard["单向时间保护<br/>只阻止 Note 早于目标时刻显示"]
+
+    Timing["谱面时间 / 判定"] -. "保持不变" .- Solver
+    Audio["音频播放"] -. "保持不变" .- Solver
+    Judgement["判定窗口 / 判定结果"] -. "保持不变" .- Solver
+
+    Online["独立联机 / 回放 / 谱面编辑"] -. "首版不支持；联机路径单独评估" .- Config

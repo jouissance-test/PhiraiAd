@@ -12,6 +12,30 @@ pub fn timeline_position(screen_height: f32, viewport_width: f32) -> f32 {
     0.06 + screen_height * 0.2 / viewport_width.max(1.)
 }
 
+/// Pause-menu origin and horizontal footprint of the Fixed Preview controls.
+pub const FIXED_PREVIEW_PANEL_LOCAL_LEFT: f32 = -0.025;
+pub const FIXED_PREVIEW_PANEL_LOCAL_RIGHT: f32 = 0.645;
+pub const FIXED_PREVIEW_PANEL_LOCAL_BOTTOM: f32 = 0.247;
+
+pub fn fixed_preview_panel_origin(exercise: bool) -> (f32, f32) {
+    (if exercise { -0.95 } else { -0.55 }, if exercise { 0.28 } else { 0.18 })
+}
+
+pub fn fixed_preview_panel_scale(exercise: bool) -> f32 {
+    if exercise { 0.65 } else { 1. }
+}
+
+pub fn fixed_preview_panel_horizontal_bounds(exercise: bool) -> (f32, f32) {
+    let x = fixed_preview_panel_origin(exercise).0;
+    let scale = fixed_preview_panel_scale(exercise);
+    (x + FIXED_PREVIEW_PANEL_LOCAL_LEFT * scale, x + FIXED_PREVIEW_PANEL_LOCAL_RIGHT * scale)
+}
+
+pub fn fixed_preview_panel_vertical_bounds(exercise: bool) -> (f32, f32) {
+    let y = fixed_preview_panel_origin(exercise).1;
+    (y, y + FIXED_PREVIEW_PANEL_LOCAL_BOTTOM * fixed_preview_panel_scale(exercise))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PracticeView {
     pub scale_percent: f32,

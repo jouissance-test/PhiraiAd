@@ -7,6 +7,8 @@ pub mod correct_sound;
 pub mod custom_judgement;
 pub mod dir;
 pub mod ext;
+pub mod fixed_preview;
+pub mod fixed_preview_policy;
 pub mod fs;
 pub mod info;
 pub mod judge;

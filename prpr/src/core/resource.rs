@@ -455,6 +455,9 @@ pub struct Resource {
     /// Practice-mode visual multiplier for note travel distance. This never
     /// changes chart time, audio playback, or judgement windows.
     pub note_flow_speed: f32,
+    /// Chart-time safety horizon for the active real-time Fixed Preview session.
+    /// `None` keeps replay/editor and disabled sessions on the original path.
+    pub fixed_preview_chart_time: Option<f64>,
     pub practice_view: crate::practice_view::PracticeView,
     /// Input-space half-turn; drawing uses a final framebuffer rotation.
     pub auto_flip_y: bool,
@@ -597,6 +600,7 @@ impl Resource {
             last_vp: (0, 0, 0, 0),
             note_width,
             note_flow_speed,
+            fixed_preview_chart_time: None,
             practice_view: Default::default(),
             auto_flip_y: false,
             rotate_chart: false,

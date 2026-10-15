@@ -41,6 +41,14 @@ pub fn display(value: f32) -> String {
     text
 }
 
+pub fn display_for_step(value: f32, step: f32) -> String {
+    if step <= 0.0015 {
+        format!("{value:.3}")
+    } else {
+        display(value)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -74,5 +82,7 @@ mod tests {
         assert_eq!(parse("20", &(0.1..20.)), Some(20.));
         assert_eq!(display(1.), "1.00");
         assert_eq!(display(3.333), "3.333");
+        assert_eq!(display_for_step(0.45, 0.001), "0.450");
+        assert_eq!(display_for_step(0.451, 0.001), "0.451");
     }
 }

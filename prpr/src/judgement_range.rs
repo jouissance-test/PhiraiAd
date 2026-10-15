@@ -38,7 +38,7 @@ fn sample_ctrl(anim: &AnimFloat, height: f64, default: f32) -> f32 {
 /// Reproduce the line-local y position used by `Note::render` at an arbitrary
 /// chart time. `point_height` is the note head height, or the Hold tail height
 /// when the tail window is being drawn.
-fn point_base_at(note: &Note, line: &JudgeLine, ctrl: &CtrlObject, res: &Resource, point_height: f64, time: f64) -> f32 {
+fn point_base_at(note: &Note, line: &JudgeLine, ctrl: &CtrlObject, res: &Resource, point_height: f64, time: f64, flow: f32) -> f32 {
     let line_height = sample(&line.height, time, 0.) as f64;
     let y_offset = sample(&note.object.translation.1, time, 0.);
     let ctrl_height = if note.speed.abs() <= f64::EPSILON {
@@ -48,7 +48,7 @@ fn point_base_at(note: &Note, line: &JudgeLine, ctrl: &CtrlObject, res: &Resourc
     } * RPE_HEIGHT as f64
         / 2.;
     let speed = note.speed * sample_ctrl(&ctrl.y, ctrl_height, 1.) as f64;
-    (((point_height - line_height) / res.aspect_ratio as f64 * speed) * res.note_flow_speed as f64 + y_offset as f64 / res.aspect_ratio as f64) as f32
+    (((point_height - line_height) / res.aspect_ratio as f64 * speed) * flow as f64 + y_offset as f64 / res.aspect_ratio as f64) as f32
 }
 
 fn current_note_half_width(note: &Note, line: &JudgeLine, ctrl: &CtrlObject, res: &Resource, x_limit: f64) -> f32 {
@@ -123,14 +123,15 @@ struct DrawContext<'a> {
     point_time: f64,
     half_width: f32,
     anchor: Anchor,
+    flow: f32,
 }
 
 impl DrawContext<'_> {
     fn rect_for_times(&self, start: f64, end: f64) -> Rect {
         let side = if self.note.above { 1. } else { -1. };
-        let at_start = point_base_at(self.note, self.line, self.ctrl, self.res, self.point_height, start);
-        let at_end = point_base_at(self.note, self.line, self.ctrl, self.res, self.point_height, end);
-        let current = point_base_at(self.note, self.line, self.ctrl, self.res, self.point_height, self.res.time);
+        let at_start = point_base_at(self.note, self.line, self.ctrl, self.res, self.point_height, start, self.flow);
+        let at_end = point_base_at(self.note, self.line, self.ctrl, self.res, self.point_height, end, self.flow);
+        let current = point_base_at(self.note, self.line, self.ctrl, self.res, self.point_height, self.res.time, self.flow);
         let (y1, y2, on_note) = match self.anchor {
             Anchor::Line => (side * at_start, side * at_end, false),
             Anchor::Note => (side * (current - at_start), side * (current - at_end), true),
@@ -195,7 +196,7 @@ fn custom_segments(
         })
 }
 
-fn render_note_ranges(note: &Note, line: &JudgeLine, res: &Resource, profile: &JudgementRangeProfile, anchor: Anchor) {
+fn render_note_ranges(note: &Note, line: &JudgeLine, res: &Resource, profile: &JudgementRangeProfile, anchor: Anchor, flow: f32) {
     if note.fake || matches!(note.judge, JudgeStatus::Judged | JudgeStatus::PreJudge) {
         return;
     }
@@ -224,6 +225,7 @@ fn render_note_ranges(note: &Note, line: &JudgeLine, res: &Resource, profile: &J
             point_time: note.time,
             half_width: current_note_half_width(note, line, &ctrl, res, x_limit),
             anchor,
+            flow,
         };
         let custom_head =
             res.config.judgement_mode == crate::config::JudgementMode::Custom && matches!(note.kind, NoteKind::Click | NoteKind::Hold { .. });
@@ -327,6 +329,7 @@ fn render_note_ranges(note: &Note, line: &JudgeLine, res: &Resource, profile: &J
                 point_time: end_time,
                 half_width: current_note_half_width(note, line, &ctrl, res, profile.hold_x),
                 anchor,
+                flow,
             };
             let tail = JudgementTimeWindow {
                 early: profile.hold_tail,
@@ -367,11 +370,12 @@ pub fn render_judgement_ranges(lines: &[JudgeLine], note_indices: &[(Vec<u32>, u
                 if note.time - note_outer_window(note, profile).early * speed > end {
                     break;
                 }
+                let flow = line.cache.fixed_preview_flow(*note_id as usize, res.note_flow_speed);
                 if draw_line {
-                    render_note_ranges(note, line, res, profile, Anchor::Line);
+                    render_note_ranges(note, line, res, profile, Anchor::Line, flow);
                 }
                 if draw_note {
-                    render_note_ranges(note, line, res, profile, Anchor::Note);
+                    render_note_ranges(note, line, res, profile, Anchor::Note, flow);
                 }
             }
         });

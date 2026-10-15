@@ -921,6 +921,14 @@ impl<'a> Ui<'a> {
     }
 
     #[inline]
+    pub fn disabled<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let touches = self.touches.replace(Vec::new());
+        let res = self.alpha(0.35, f);
+        self.touches = touches;
+        res
+    }
+
+    #[inline]
     pub fn with<R>(&mut self, transform: Matrix, f: impl FnOnce(&mut Self) -> R) -> R {
         let old = self.transform;
         self.transform = old * transform;
@@ -1110,6 +1118,16 @@ impl<'a> Ui<'a> {
                     ..if *value { WHITE } else { self.background() }
                 },
             );
+            if *value {
+                let check_color = self.background();
+                self.text("✓")
+                    .pos(r.center().x, r.center().y)
+                    .anchor(0.5, 0.5)
+                    .size(0.38)
+                    .color(check_color)
+                    .no_baseline()
+                    .draw();
+            }
             let r = Rect::new(r.x, r.y, text.right() - r.x, (text.bottom() - r.y).max(w));
             if self.clicked(r, entry) {
                 *value ^= true;
@@ -1285,7 +1303,7 @@ impl<'a> Ui<'a> {
             let number_text = if input_id.starts_with("exercise_view_") {
                 value.to_string()
             } else {
-                crate::practice_speed::display(*value)
+                crate::practice_speed::display_for_step(*value, spec.step)
             };
             self.text(format!("{}{}", number_text, spec.suffix))
                 .pos(number.center().x, number.center().y)
@@ -1335,6 +1353,7 @@ impl<'a> Ui<'a> {
                 "exercise_view_scale",
                 "exercise_view_x",
                 "exercise_view_y",
+                "fixed_preview_time",
             ] {
                 for suffix in ["", ":drag", ":-", ":+"] {
                     state.remove(&format!("{id}{suffix}"));
@@ -1663,7 +1682,9 @@ mod resource_slider_tests {
         slider.pos = 0.6;
         slider
     }
-    fn touch(phase: TouchPhase, x: f32) -> Touch { Touch { id: 123, phase, position: vec2(x, 0.12) } }
+    fn touch(phase: TouchPhase, x: f32) -> Touch {
+        Touch { id: 123, phase, position: vec2(x, 0.12), time: 0. }
+    }
     #[test]
     fn crossing_threshold_preserves_value_then_moves_relatively() {
         let mut slider = slider(); let mut value = 50.25;
