@@ -1002,15 +1002,17 @@ impl ChartList {
             config.use_keyboard ^= true;
             return Ok(Some(true));
         }
-        if !self.replica && self.fixed_preview_btn.touch(touch, t) {
+        if self.replica && self.fixed_preview_btn.touch(touch, t) {
             config.fixed_preview_time_enabled ^= true;
             return Ok(Some(true));
         }
-        if !self.replica {
+        if self.replica {
             if let wt @ Some(_) = self.fixed_preview_slider.touch(touch, t, &mut config.fixed_preview_time) {
                 config.fixed_preview_time = config.fixed_preview_seconds();
                 return Ok(wt);
             }
+        }
+        if !self.replica {
             if let wt @ Some(_) = self.speed_slider.touch(touch, t, &mut config.speed) {
                 return Ok(wt);
             }
@@ -1141,15 +1143,17 @@ impl ChartList {
                 render_switch(ui, rr, t, &mut self.use_keyboard_btn, config.use_keyboard);
             }
         }
-        if !self.replica {
+        if self.replica {
             item! { w;
-                render_partition_title(ui, w, self.replica, Cow::Borrowed("统一预判时间"), Some(Cow::Borrowed("按现实时间统一音符进入视野到判定的时长")));
+                render_partition_title(ui, w, self.replica, Cow::Borrowed("统一预判时间（实验性功能）"), Some(Cow::Borrowed("按现实时间统一音符入屏到判定的时长；特殊谱面可能不一致")));
                 render_switch(ui, rr, t, &mut self.fixed_preview_btn, config.fixed_preview_time_enabled);
             }
             item! { w;
                 render_partition_title(ui, w, self.replica, Cow::Borrowed("目标预判时间"), None);
                 self.fixed_preview_slider.render(ui, rr, t, config.fixed_preview_seconds(), format!("{:.3}s", config.fixed_preview_seconds()));
             }
+        }
+        if !self.replica {
             item! { w;
                 render_partition_title(ui, w, self.replica, tl!("item-speed"), None);
                 self.speed_slider.render(ui, rr, t, config.speed, format!("{:.2}", config.speed));

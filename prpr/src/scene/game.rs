@@ -1347,7 +1347,7 @@ impl GameScene {
                     ui.dx(x);
                     ui.dy(y);
                     ui.with(Matrix::new_scaling(crate::practice_view::fixed_preview_panel_scale(self.mode == GameMode::Exercise)), |ui| {
-                        ui.checkbox_with_id("fixed_preview_enabled", "统一预判时间", &mut res.config.fixed_preview_time_enabled);
+                        ui.checkbox_with_id("fixed_preview_enabled", "统一预判（实验性）", &mut res.config.fixed_preview_time_enabled);
                         ui.dy(0.075);
                         ui.practice_speed_slider(
                             "fixed_preview_time",

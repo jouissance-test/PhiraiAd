@@ -17,10 +17,72 @@ macro_rules! ttl {
 }
 struct Data {
     config: Config,
+    settings_expansion: SettingsExpansionState,
 }
-thread_local! { static DATA: UnsafeCell<Data> = UnsafeCell::new(Data { config: Config::default() }); }
+#[derive(Default)]
+struct SettingsExpansionState {
+    gameplay: bool,
+    ranges: bool,
+    reports: bool,
+    timing: bool,
+    noise: bool,
+    resources: bool,
+}
+thread_local! { static DATA: UnsafeCell<Data> = UnsafeCell::new(Data { config: Config::default(), settings_expansion: SettingsExpansionState { gameplay: true, ranges: true, reports: true, timing: true, noise: true, resources: false } }); }
 fn get_data() -> &'static Data {
     DATA.with(|d| unsafe { &*d.get() })
+}
+fn save_data() -> Result<()> {
+    Ok(())
+}
+
+mod custom_resources {
+    #[derive(Clone, Copy)]
+    pub enum Kind {
+        Music,
+        Background,
+        Character,
+    }
+    impl Kind {
+        pub fn title(self) -> &'static str {
+            match self {
+                Self::Music => "Music",
+                Self::Background => "Background",
+                Self::Character => "Character",
+            }
+        }
+
+        pub fn formats(self) -> &'static str {
+            "test format"
+        }
+    }
+}
+
+mod custom_font {
+    use anyhow::Result;
+
+    pub fn reset() -> Result<()> {
+        Ok(())
+    }
+
+    pub fn display_name() -> String {
+        "Default".to_owned()
+    }
+}
+
+mod prpr {
+    pub mod scene {
+        pub fn request_file(_: &str) {}
+    }
+}
+
+struct Message;
+impl Message {
+    fn ok(self) {}
+    fn error(self) {}
+}
+fn show_message(_: impl Into<String>) -> Message {
+    Message
 }
 fn get_data_mut() -> &'static mut Data {
     DATA.with(|d| unsafe { &mut *d.get() })
@@ -79,6 +141,9 @@ impl Ui {
     }
     fn fill_path(&mut self, r: &Rect, _: Color) {
         self.cards.push(self.rect(*r));
+    }
+    fn alpha(&mut self, _: f32, f: impl FnOnce(&mut Self)) {
+        f(self);
     }
     fn text(&mut self, text: impl Into<String>) -> Text<'_> {
         Text {
@@ -217,7 +282,16 @@ fn render_title<'a>(ui: &mut Ui, title: impl Into<Cow<'a, str>>, sub: Option<Cow
 }
 include!(concat!(env!("OUT_DIR"), "/settings_groups.rs"));
 fn setup() -> ReplicaList {
-    get_data_mut().config = Config::default();
+    let data = get_data_mut();
+    data.config = Config::default();
+    data.settings_expansion = SettingsExpansionState {
+        gameplay: true,
+        ranges: true,
+        reports: true,
+        timing: true,
+        noise: true,
+        resources: false,
+    };
     ReplicaList::new()
 }
 fn render(p: &mut ReplicaList, w: f32) -> Ui {
@@ -254,11 +328,33 @@ fn single_choice_updates_every_note_and_ap_fc_stays_in_chart_tab() {
     let ui = render(&mut p, 1.6);
     assert!(ui.text.iter().any(|(s, _, _)| s == "item-phigros-strict-judgement"));
     click(&mut p, find(&ui, "judgement-mode-phigros"));
-    assert_eq!(get_data().config.flick_judgement_mode(), JudgementMode::Phira);
+    assert_eq!(get_data().config.flick_judgement_mode(), JudgementMode::Custom);
     let mut chart = ChartList::new(false);
     let mut ui = Ui::default();
     chart.render(&mut ui, Rect::new(0., 0., 1.6, 1.), 1.);
     assert!(ui.text.iter().any(|(s, _, _)| s == "item-ap-fc-indicator"));
+}
+
+#[test]
+fn experimental_fixed_preview_is_in_replica_gameplay_and_respects_collapse() {
+    let mut p = setup();
+    let ui = render(&mut p, 1.6);
+    assert!(ui.text.iter().any(|(s, _, _)| s == "统一预判时间（实验性功能）"));
+    assert!(ui.text.iter().any(|(s, _, _)| s == "目标预判时间"));
+    let enabled = p.chart.fixed_preview_btn.r.unwrap();
+    click(&mut p, enabled);
+    assert!(get_data().config.fixed_preview_time_enabled);
+
+    let mut chart = ChartList::new(false);
+    let mut chart_ui = Ui::default();
+    chart.render(&mut chart_ui, Rect::new(0., 0., 1.6, 1.), 1.);
+    assert!(!chart_ui.text.iter().any(|(s, _, _)| s.contains("预判")));
+
+    click(&mut p, find(&ui, "replica-gameplay"));
+    click(&mut p, enabled);
+    assert!(get_data().config.fixed_preview_time_enabled);
+    let ui = render(&mut p, 1.6);
+    assert!(!ui.text.iter().any(|(s, _, _)| s.contains("预判")));
 }
 #[test]
 fn collapsed_groups_ignore_old_hit_rectangles_without_changing_values() {

@@ -12,7 +12,7 @@ pub const NOTE_FLOW_SPEED_MIN: f32 = 0.1;
 pub const NOTE_FLOW_SPEED_MAX: f32 = 20.0;
 pub const NOTE_FLOW_SPEED_STEP: f32 = 0.05;
 pub const FIXED_PREVIEW_TIME_MIN: f32 = 0.1;
-pub const FIXED_PREVIEW_TIME_MAX: f32 = 5.0;
+pub const FIXED_PREVIEW_TIME_MAX: f32 = 0.75;
 pub const FIXED_PREVIEW_TIME_STEP: f32 = 0.001;
 pub const FIXED_PREVIEW_TIME_DEFAULT: f32 = 0.45;
 pub const JUDGEMENT_RANGE_HORIZON_MIN: f32 = 0.1;
@@ -664,13 +664,13 @@ mod speed_tests {
         assert_eq!(config.speed, 0.75);
         assert_eq!(config.note_flow_speed, 1.5);
         assert!(config.fixed_preview_time_enabled);
-        assert_eq!(config.fixed_preview_time, 2.4);
+        assert_eq!(config.fixed_preview_time, 0.75);
         let mut restored: Config = serde_json::from_slice(&serde_json::to_vec(&config).unwrap()).unwrap();
         restored.init();
         assert_eq!(restored.speed, 0.75);
         assert_eq!(restored.note_flow_speed, 1.5);
         assert!(restored.fixed_preview_time_enabled);
-        assert_eq!(restored.fixed_preview_time, 2.4);
+        assert_eq!(restored.fixed_preview_time, 0.75);
         let defaults = serde_json::from_str::<Config>("{}").unwrap();
         assert_eq!(defaults.note_flow_speed, 1.);
         assert!(!defaults.fixed_preview_time_enabled);
@@ -700,7 +700,7 @@ mod speed_tests {
         for (playback, flow, preview, expected_playback, expected_flow, expected_preview) in [
             (f32::NAN, f32::INFINITY, f32::NAN, 1., 1., FIXED_PREVIEW_TIME_DEFAULT),
             (0., -1., 0., 0.5, 0.1, 0.1),
-            (100., 100., 100., 2., 5., 5.),
+            (100., 100., 100., 2., 5., 0.75),
         ] {
             let mut config = Config {
                 speed: playback,

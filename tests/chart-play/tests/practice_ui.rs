@@ -145,6 +145,29 @@ fn coordinate_slider_endpoints_and_center() {
 }
 
 #[test]
+fn fixed_preview_slider_uses_the_whole_short_range_monotonically() {
+    use phira_chart_play_tests::config::{FIXED_PREVIEW_TIME_MIN, FIXED_PREVIEW_TIME_MAX, FIXED_PREVIEW_TIME_STEP};
+    let mut value = FIXED_PREVIEW_TIME_MIN;
+    let mut previous = value;
+    for i in 0..=20 {
+        let position = i as f32 / 20.;
+        let mut ui = Ui {
+            touches: Some(vec![Touch { id: 11, position: Vec2 { x: 0.4 * position, y: 0.115 }, phase: TouchPhase::Started }]),
+            ..Default::default()
+        };
+        ui.practice_speed_slider("fixed_preview_time", "Preview", FIXED_PREVIEW_TIME_MIN..FIXED_PREVIEW_TIME_MAX, FIXED_PREVIEW_TIME_STEP, &mut value, Some(0.4));
+        let expected = FIXED_PREVIEW_TIME_MIN + (FIXED_PREVIEW_TIME_MAX - FIXED_PREVIEW_TIME_MIN) * position;
+        assert!((value - expected).abs() <= FIXED_PREVIEW_TIME_STEP, "position={position}, value={value}, expected={expected}");
+        assert!(value >= previous);
+        // The rendered knob must match the touched coordinate, including both ends.
+        assert!((ui.circles[0].0 - 0.4 * position).abs() < 0.001);
+        previous = value;
+        Ui::clear_practice_speed_drag();
+    }
+    assert_eq!(value, FIXED_PREVIEW_TIME_MAX);
+}
+
+#[test]
 fn checked_box_has_an_explicit_check_mark() {
     let mut ui = Ui::default();
     let mut checked = true;

@@ -1230,7 +1230,8 @@ impl<'a> Ui<'a> {
         })
     }
 
-    /// Practice slider: capture the initiating finger until release/cancellation, even across empty frames.
+    /// Practice slider: use 1x as the midpoint only when it is inside the range.
+    /// Capture the initiating finger until release/cancellation, even across empty frames.
     pub fn practice_speed_slider(
         &mut self,
         input_id: &str,
@@ -1246,7 +1247,7 @@ impl<'a> Ui<'a> {
             crate::practice_view::SliderSpec {
                 min: range.start,
                 max: range.end,
-                midpoint: 1.,
+                midpoint: if range.start < 1. && 1. < range.end { 1. } else { (range.start + range.end) * 0.5 },
                 step,
                 suffix: "",
             },

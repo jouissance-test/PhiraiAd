@@ -92,9 +92,9 @@ key 改变时重建；普通 render/update 帧只比较 key 并读取缓存，�
 `Config` 新增两个向后兼容的 serde-default 字段：
 
 - `fixed_preview_time_enabled = false`；
-- `fixed_preview_time = 0.45`，初始化时裁剪到 `0.1..5.0`。
+- `fixed_preview_time = 0.45`，初始化和读取时裁剪到 `0.1..0.75`（2026-10-16 按用户要求收紧上限；旧版保存的超限值也会裁剪）。
 
-全局设置页提供开关和 `0.001 s` 步进滑条，所有入口固定显示三位小数。所有首版支持模式的暂停菜单提供同一组控件；暂停修改直接更新当前 `Resource::config`、持久化到应用全局配置，并在下一绘制帧因 key 变化而重建缓存，不 reload chart/audio/texture/scene。
+全局入口位于“改版设置 → 改版玩法”，标为“统一预判时间（实验性功能）”，不再放在“谱面”页。提供开关和 `0.001 s` 步进滑条，所有入口固定显示三位小数。所有首版支持模式的暂停菜单提供同一组控件，标为“统一预判（实验性）”；暂停修改直接更新当前 `Resource::config`、持久化到应用全局配置，并在下一绘制帧因 key 变化而重建缓存，不 reload chart/audio/texture/scene。
 
 开启时保留手动 Note Flow Speed 的已保存值，但全局 Mods 面板与练习暂停菜单中的手动 flow 控件显示为禁用且不接受修改；关闭后恢复原值和原有模式逻辑。
 
@@ -116,7 +116,7 @@ key 改变时重建；普通 render/update 帧只比较 key 并读取缓存，�
 - 无 bracket 的极端父子线运动、反向/零速或特殊 Hold 几何安全回退，不尝试重写谱面运动系统。
 - 回放查看和谱面编辑明确不启用。仓库当前联机共用 NoRetry 实时场景，没有独立 renderer 可扩展或单独验收。
 
-## 7. 当前验证记录
+## 7. 首版历史验证记录
 
 - `cargo check -p prpr --target aarch64-linux-android`：通过。
 - `cargo check -p phira --lib --target aarch64-linux-android`：通过，覆盖应用设置页、暂停持久化桥接和完整 Android 库。
@@ -131,3 +131,38 @@ key 改变时重建；普通 render/update 帧只比较 key 并读取缓存，�
 现有 Android Studio AVD `Codex_Pixel_8_API_36_1` 是 x86_64，而当前 Android 发布链固定生成 ARM64 APK，因此该 AVD 不能安装上述测试包。真机视觉验收仍需 ARM64 设备；若要使用该 AVD，需要另行补齐 x86_64 原生库与 APK 打包路径。
 
 编译使用仓库文档指定的 UbuntuD、nightly toolchain 和 NDK r27d，并按 `scripts/build_android_release.sh` 设置 API 21 的 Android C/C++ linker。构建只产生既有 warning，没有本功能新增的编译 warning。
+
+## 8. 2026-10-16 透明承载线修复
+
+### 复现与根因
+
+用户在真机 `Waking Shadows (feat. Eili)` 的约 50–60 秒反馈：目标预判 `0.8 s` 明显、`0.7 s` 也可见，一部分 Note 减速而另一些仍接近原速。本轮从应用导出实际谱包到 `D:\phiraiad\artifacts\waking-shadows.zip`，只读分析，不修改用户谱面。
+
+`note_quad_at()` 原先在目标采样时刻的 **判定线 alpha ≤ 0** 时拒绝构造 Note 几何，导致求解失败并回退原全局 flow。然而 `JudgeLine::render()` 的 alpha 为 0 只隐藏承载线本身；线上 Note 仍按自己的 alpha/control alpha 正常绘制。实际谱面这段大量使用这样的透明承载线，因而错误地混入了原速 Note。
+
+修复只移除求解器对承载线 alpha 的拒绝，保留 Note 自身和 control alpha 的检查。负 alpha 的 RPE/PEC 显隐扩展继续由实际 renderer 决定；求解成功不会绕过 renderer 的隐藏逻辑。未改变音频、判定时钟、原谱事件、flow 安全区间或 fake Note 策略。
+
+### 回归与边界
+
+- 新主机测试从生产 `fixed_preview.rs` 提取几何采样和求解函数，运行真实矩阵变换、动画采样、viewport 相交与有界求解，不复制求解器。
+- 修复前：3 项新测试中 2 项失败（alpha=0 时返回 `None`，同几何不透明时可求解）；修复后 3 项全部通过。另有基于实谱 Note 属性、冻结场景以隔离 alpha 的用例；它不是完整动态谱面回放。
+- 暂停滑条原先固定以 `1` 为中点；上限收紧到 `0.75` 后，中点必须随范围调整，否则右半段映射失真。现仅在范围严格包含 `1` 时保留原中点，其余范围采用算术中点；增加整条短范围滑条单调性及端点/触点位置回归，修复前失败、修复后通过。
+- 配置、几何、fake policy、练习 UI、设置分组共 26 项定向测试通过。
+- 扩展执行整个 `tests/chart-play` 测试集时，旧 `best_board_ui`/库内 practice-view 适配器缺少类型、方法和数学函数而无法编译；这些非本次功能的测试未宣称通过。
+- 判定线在目标时刻仍在屏外、原谱有跳变/零速、无可见性 bracket 或有特殊显隐时，仍可能安全回退；固定预判不等于所有 Note 的全程屏幕像素速度相同。因此保留实验性标记及 `0.75 s` 上限。
+
+定向回归命令：
+
+```sh
+cargo test --offline --manifest-path tests/chart-play/Cargo.toml \
+  --test fixed_preview_geometry --test fixed_preview_config \
+  --test fixed_preview_policy --test practice_ui --test settings_ui
+```
+
+### 构建与实机材料
+
+- UbuntuD `nightly-2026-09-14` / NDK r27d：`cargo build --locked -p phira --lib --target aarch64-linux-android --release --features video` 通过。包含透明线修复的中间包及最终滑条修正均分别完成 release 构建，只有既有 warning。
+- 同一 ARM64 真机、播放倍率 `1.00`、预判 `0.700 s`、练习起点 `50.55 s`，保存修复前/后的 15 秒录屏：`D:\phiraiad\artifacts\phiraiad-baseline-0700.mp4` 和 `phiraiad-fixed-0700.mp4`。前者已含上限/页面修改但沿用旧求解器，后者含透明线修复；两段没有做逐帧时钟同步，不据此声称每个 Note 的预判误差都已量化消失。
+- 设置迁移与实验性标注的真机截图：`D:\phiraiad\artifacts\phiraiad-replica.png`。应用覆盖安装保留原有谱面与账号，不卸载或清数据。
+- 最终包：`D:\phiraiad\artifacts\PhiraiAd-fixed-preview-test3-arm64.apk`，版本 `1.6.0-fixed-preview-test3` / `12004`，SHA-256 `ce005ea5c2d53b112972fb76936faac4426967a80be2366be7558ce3798a1c41`。本地测试证书的 v1/v2/v3 签名、16 KiB 对齐、ZIP CRC、manifest、原生库匹配检查均通过；随后 ADB 覆盖安装成功，并以 `dumpsys package` 核对安装版本。
+- 最终包真机确认：暂停页实验性文字无重叠；滑条最右端为 `0.750`，减一次为 `0.749`、加回后继续加仍为 `0.750`。最终 `0.750 s` 运行录屏保存为 `D:\phiraiad\artifacts\phiraiad-final-0750.mp4`，控件截图为 `phiraiad-final-pause.png` / `phiraiad-final-step.png`。完成后退出播放、返回 Android 桌面，恢复测试前的充电常亮配置值 `15`，发送 `KEYCODE_SLEEP`，设备进入息屏/Dozing 状态（不更改用户的息屏显示偏好）。

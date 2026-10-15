@@ -181,8 +181,9 @@ fn note_quad_at(chart: &Chart, line_id: usize, note_id: usize, res: &Resource, t
     if !time.is_finite() || !flow.is_finite() || flow <= 0. || res.aspect_ratio.abs() <= f32::EPSILON {
         return None;
     }
-    // Negative line alpha is RPE's appear-before extension; zero is also not visible.
-    if sample(&line.object.alpha, time, 1.) <= 0. || sample(&note.object.alpha, time, 1.) <= 0. {
+    // Carrier opacity does not affect note geometry: transparent lines can still
+    // carry visible notes. The renderer owns negative-alpha visibility extensions.
+    if sample(&note.object.alpha, time, 1.) <= 0. {
         return None;
     }
 
