@@ -1,5 +1,15 @@
 // Compile the actual settings groups against recording UI adapters in settings_ui.rs.
 fn main() {
+    // Run the production sampler/solver with headless shape adapters.
+    let path = "../../prpr/src/fixed_preview.rs";
+    println!("cargo:rerun-if-changed={path}");
+    let source = std::fs::read_to_string(path).unwrap();
+    let geometry = &source[source
+        .find("#[inline]\nfn cross(")
+        .or_else(|| source.find("#[inline]\r\nfn cross("))
+        .unwrap()..source.find("impl Chart {").unwrap()];
+    let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+    std::fs::write(out.join("fixed_preview_geometry.rs"), geometry).unwrap();
     let path = "../../phira/src/page/best_board_export.rs";
     println!("cargo:rerun-if-changed={path}");
     let source = std::fs::read_to_string(path).unwrap();
