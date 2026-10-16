@@ -126,13 +126,16 @@ def analyze(report, tolerance=0.020):
             counts["left_censored"] += 1
             continue
         counts["eligible_notes"] += 1
+        plan = state.get("plan")
+        supported_plan = plan in ("constant", "gate_only") if plan is not None else state["reason"] == "solved"
         item = {"line": key[0], "note": key[1], "hit_chart_time": hit, "kind": note["kind"],
+                "solver_plan": plan or ("constant" if state["reason"] == "solved" else "legacy_fallback"),
                 "solver_reason": state["reason"], "flow": state["flow"],
                 "target_preview_real_seconds": preview, "transition_window": transition,
                 "baseline_visible_frames": base.get("visible_frames", 0), "fixed_visible_frames": fixed.get("visible_frames", 0),
                 "flags": [], "measurements": {}}
         flags, metrics = item["flags"], item["measurements"]
-        if not transition and state["reason"] != "solved":
+        if not transition and not supported_plan:
             flags.append("solver_fallback")
         if fixed.get("first_sample"):
             first = fixed["first_sample"]["chart_time"]
@@ -222,6 +225,7 @@ def check_cases(report, cases):
     if report["metadata"].get("scenario"):
         raise ValueError("Steady-state regression cases cannot use a scenario trace")
     stats = {note_key(n): n for n in report["modes"]["fixed"]["notes"]}
+    solver = {note_key(n): n for n in report["solver"]}
     results = []
     for case in cases["notes"]:
         metadata = next((n for n in report["notes"] if n["line"] == case["line"] and abs(n["time"] - case["hit_chart_time"]) < 1e-6 and n["kind"].split(" {")[0] == case["kind"]), None)
@@ -237,10 +241,15 @@ def check_cases(report, cases):
             raise ValueError(f"Case first visibility is left-censored: {case['id']}")
         duration = active_seconds(report, first["chart_time"], hit) if first else None
         error = duration - meta["preview_real_seconds"] if duration is not None else None
-        passed = error is not None and abs(error) <= summary["sampling_error_seconds"]
+        solver_state = solver[note_key(metadata)]
+        plan = solver_state.get("plan")
+        allowed_plans = case.get("allowed_plans")
+        plan_passed = allowed_plans is None or plan in allowed_plans
+        passed = error is not None and abs(error) <= summary["sampling_error_seconds"] and plan_passed
         results.append({"id": case["id"], "passed": passed, "observed_preview_seconds": duration,
                         "target_preview_seconds": meta["preview_real_seconds"], "error_seconds": error,
-                        "line": metadata["line"], "note": metadata["note"]})
+                        "solver_plan": plan, "solver_reason": solver_state["reason"],
+                        "allowed_plans": allowed_plans, "line": metadata["line"], "note": metadata["note"]})
     if not results:
         raise ValueError("Regression cases are empty")
     return {"passed": all(n["passed"] for n in results), "cases": results}
@@ -250,9 +259,9 @@ def write_summary(path, summary):
     save_json(path, summary)
     with path.with_suffix(".csv").open("x", encoding="utf-8-sig", newline="") as stream:
         writer = csv.writer(stream)
-        writer.writerow(["line", "note", "hit_chart_time", "kind", "solver_reason", "flow", "flags", "preview_error_seconds", "speed_ratio"])
+        writer.writerow(["line", "note", "hit_chart_time", "kind", "solver_plan", "solver_reason", "flow", "flags", "preview_error_seconds", "speed_ratio"])
         for n in summary["findings"]:
-            writer.writerow([n["line"], n["note"], n["hit_chart_time"], n["kind"], n["solver_reason"], n["flow"], ";".join(n["flags"]), n["measurements"].get("first_visible_error_seconds"), n["measurements"].get("peak_center_speed_ratio")])
+            writer.writerow([n["line"], n["note"], n["hit_chart_time"], n["kind"], n["solver_plan"], n["solver_reason"], n["flow"], ";".join(n["flags"]), n["measurements"].get("first_visible_error_seconds"), n["measurements"].get("peak_center_speed_ratio")])
 
 
 def triage_run(directory):
@@ -265,8 +274,8 @@ def triage_run(directory):
         summary = json.loads(path.read_text(encoding="utf-8"))
         for note in summary["findings"]:
             for flag in note["flags"]:
-                signature = (flag, note["solver_reason"], note["kind"].split(" {")[0])
-                group = groups.setdefault(signature, {"flag": flag, "solver_reason": signature[1], "kind": signature[2], "occurrences": 0, "unique_notes": set(), "examples": []})
+                signature = (flag, note["solver_plan"], note["solver_reason"], note["kind"].split(" {")[0])
+                group = groups.setdefault(signature, {"flag": flag, "solver_plan": signature[1], "solver_reason": signature[2], "kind": signature[3], "occurrences": 0, "unique_notes": set(), "examples": []})
                 group["occurrences"] += 1
                 group["unique_notes"].add((summary["chart_sha256"], note["line"], note["note"]))
                 example = {"job": job["id"], "chart": summary["chart_name"], "hit_chart_time": note["hit_chart_time"], "line": note["line"], "note": note["note"], "flow": note["flow"], "score": note["score"], "measurements": note["measurements"], "findings_file": str(path.resolve())}
@@ -411,10 +420,10 @@ def main():
         elif args.command == "triage":
             result = triage_run(args.run)
             save_json(args.out, result)
-            rows = ["# Candidate clusters", "", result["interpretation"], "", "| Flag | Solver | Kind | Unique Notes | Occurrences | Representative chart / time |", "|---|---|---|---:|---:|---|"]
+            rows = ["# Candidate clusters", "", result["interpretation"], "", "| Flag | Plan | Reason | Kind | Unique Notes | Occurrences | Representative chart / time |", "|---|---|---|---|---:|---:|---|"]
             for group in result["groups"]:
                 examples = "; ".join(f"{n['chart']} / {n['hit_chart_time']:.3f}s (L{n['line']}:N{n['note']})" for n in group["examples"])
-                rows.append(f"| {group['flag']} | {group['solver_reason']} | {group['kind']} | {group['unique_notes']} | {group['occurrences']} | {examples} |")
+                rows.append(f"| {group['flag']} | {group['solver_plan']} | {group['solver_reason']} | {group['kind']} | {group['unique_notes']} | {group['occurrences']} | {examples} |")
             with args.out.with_suffix(".md").open("x", encoding="utf-8") as stream:
                 stream.write("\n".join(rows) + "\n")
             print(json.dumps({"groups": len(result["groups"]), "out": str(args.out)}, ensure_ascii=False))

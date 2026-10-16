@@ -27,7 +27,7 @@ def fixture(first=9.55):
                          "engine": {"sha256": "fixture-engine"},
                          "resource_pack_manifest": [{"path": "click.png", "bytes": 10, "sha256": "fixture-texture"}]},
             "notes": [{"line": 0, "note": 0, "time": 10.0, "kind": "Click", "fake": False}],
-            "solver": [{"line": 0, "note": 0, "reason": "solved", "flow": 1.0}],
+            "solver": [{"line": 0, "note": 0, "plan": "constant", "reason": "solved", "flow": 1.0}],
             "modes": {"baseline": {"notes": [copy.deepcopy(stats)]}, "fixed": {"notes": [copy.deepcopy(stats)]}}}
 
 
@@ -50,6 +50,23 @@ class WorkflowTests(unittest.TestCase):
         result = workflow.check_cases(report, cases())
         self.assertFalse(result["passed"])
         self.assertAlmostEqual(result["cases"][0]["observed_preview_seconds"], 0.096)
+
+    def test_gate_only_is_supported_but_original_is_a_fallback(self):
+        report = fixture()
+        report["solver"][0].update(plan="gate_only", reason="gate_only")
+        self.assertNotIn("solver_fallback", workflow.analyze(report)["counts"])
+        report["solver"][0].update(plan="original", reason="visibility_interval_rejected")
+        self.assertEqual(workflow.analyze(report)["counts"]["solver_fallback"], 1)
+
+    def test_behavior_case_can_require_a_supported_plan(self):
+        report = fixture()
+        required = cases()
+        required["notes"][0]["allowed_plans"] = ["constant", "gate_only"]
+        self.assertTrue(workflow.check_cases(report, required)["passed"])
+        report["solver"][0].update(plan="original", reason="visibility_interval_rejected")
+        result = workflow.check_cases(report, required)
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["cases"][0]["solver_plan"], "original")
 
     def test_missing_or_failed_calibration_is_not_a_pass(self):
         for value in [None, {}, {"passed": False}]:
@@ -95,13 +112,14 @@ class WorkflowTests(unittest.TestCase):
     def test_scenario_uses_corresponding_solver_segment(self):
         report = fixture(9.8)
         report["metadata"]["scenario"] = [{"at": 8.1, "preview": 0.2}]
-        changed = {"line": 0, "note": 0, "reason": "solved", "flow": 6.0}
-        report["solver"][0]["reason"] = "minimum_not_visible"
+        changed = {"line": 0, "note": 0, "plan": "constant", "reason": "solved", "flow": 6.0}
+        report["solver"][0].update(plan="original", reason="minimum_not_visible")
         report["solver_segments"] = [{"applied_chart_time": 8.0, "solver": report["solver"]}, {"applied_chart_time": 8.1, "solver": [changed]}]
         # Force a candidate so the selected solver identity is inspectable.
         report["modes"]["fixed"]["notes"][0]["max_center_step_per_real_second"] = 10
         note = workflow.analyze(report)["findings"][0]
         self.assertEqual(note["flow"], 6.0)
+        self.assertEqual(note["solver_plan"], "constant")
         self.assertEqual(note["solver_reason"], "solved")
         self.assertNotIn("solver_fallback", note["flags"])
 

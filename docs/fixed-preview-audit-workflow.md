@@ -89,6 +89,8 @@ Linux 下同样使用该 Python 脚本，只需传 Linux 绝对路径。默认�
 
 需要逐帧深入时直接调用引擎，加 `--frames PATH.jsonl`。默认不保存整谱每一帧的全量 quads，避免过大数据；原始聚合保留首次/末次可见、可见 spans、最大位移及峰值速度对应的两帧四边形。
 
+求解报告中的 `constant` 与 `gate_only` 都是受支持计划：前者采用通过完整区间验证的常量 flow，后者保留原 flow、只从目标时刻开放显示。只有 `original` 才是安全回退，审计器会将它记为 `solver_fallback`。已知用例还可用 `allowed_plans` 要求 Note 必须由受支持计划接管，防止“时间碰巧正确但其实已经回退”被误判为修复。
+
 `solver_fallback`、`preview_timing_mismatch`、`visibility_gaps`、`not_visible_near_hit`、`no_fixed_visibility_baseline_visible` 是可量化现象；`speed_amplification_candidate` 与 `screen_interior_appearance_candidate` 只是优先排查线索。谱面有意显隐、Hold 的几何形状变化都可能产生候选，不可把所有 flag 数量当作已确认 Bug 数量。
 
 预判误差默认容差为 `max(20ms, 2/hz)`。只分析判定前的几何数据，避免未执行判定导致命中后的继续绘制污染指标。扫描边界截断首次出现时标记 censored；零 eligible Note 是覆盖不足而不是通过。不同播放速度下按分段 `chart_delta / speed` 计算 active 可读时长，主动暂停不计入预判时长。
