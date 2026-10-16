@@ -89,7 +89,7 @@ Linux 下同样使用该 Python 脚本，只需传 Linux 绝对路径。默认�
 
 需要逐帧深入时直接调用引擎，加 `--frames PATH.jsonl`。默认不保存整谱每一帧的全量 quads，避免过大数据；原始聚合保留首次/末次可见、可见 spans、最大位移及峰值速度对应的两帧四边形。
 
-求解报告中的 `constant` 与 `gate_only` 都是受支持计划：前者采用通过完整区间验证的常量 flow，后者保留原 flow、只从目标时刻开放显示。只有 `original` 才是安全回退，审计器会将它记为 `solver_fallback`。已知用例还可用 `allowed_plans` 要求 Note 必须由受支持计划接管，防止“时间碰巧正确但其实已经回退”被误判为修复。
+求解报告中的 `constant` 与 `gate_only` 都是受支持计划：前者采用通过完整区间验证的常量 flow，后者保留原 flow、只从目标时刻开放显示。只有 `original` 才是安全回退，审计器会将它记为 `solver_fallback`，不再对它强求统一预判时长，而是逐项比较 baseline/fixed 的可见帧、spans、首次/末次四边形和运动峰值；任何差异记为 `fallback_visual_mismatch`。提交数量这类纯裁剪优化计数不参与等价判定。已知用例还可用 `allowed_plans` 要求 Note 必须由受支持计划接管，防止“时间碰巧正确但其实已经回退”被误判为修复。
 
 `solver_fallback`、`preview_timing_mismatch`、`visibility_gaps`、`not_visible_near_hit`、`no_fixed_visibility_baseline_visible` 是可量化现象；`speed_amplification_candidate` 与 `screen_interior_appearance_candidate` 只是优先排查线索。谱面有意显隐、Hold 的几何形状变化都可能产生候选，不可把所有 flag 数量当作已确认 Bug 数量。
 

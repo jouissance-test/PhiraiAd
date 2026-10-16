@@ -137,6 +137,19 @@ def analyze(report, tolerance=0.020):
         flags, metrics = item["flags"], item["measurements"]
         if not transition and not supported_plan:
             flags.append("solver_fallback")
+            # Fixed Preview deliberately makes no timing promise for Original.
+            # Its contract is stricter in another direction: visible production
+            # behavior must stay identical to baseline. Ignore submission-only
+            # counters because disabling aggressive culling may submit the same
+            # off-screen geometry one frame earlier without changing visibility.
+            fallback_visual_keys = (
+                "visible_frames", "first_sample", "last_sample", "spans", "spans_real",
+                "longest_contiguous_visible_real_seconds", "max_center_step_ndc",
+                "max_center_step_per_real_second", "max_step_samples", "max_speed_samples",
+                "topology_changes",
+            )
+            if any(base.get(name) != fixed.get(name) for name in fallback_visual_keys):
+                flags.append("fallback_visual_mismatch")
         if fixed.get("first_sample"):
             first = fixed["first_sample"]["chart_time"]
             observed = active_seconds(report, first, hit)
@@ -145,31 +158,31 @@ def analyze(report, tolerance=0.020):
             first_censored = first <= start + speed / hz * 0.1
             if first_censored:
                 flags.append("first_visibility_left_censored")
-            if not transition and not first_censored and abs(observed - preview) > margin:
+            if supported_plan and not transition and not first_censored and abs(observed - preview) > margin:
                 flags.append("preview_timing_mismatch")
             spans = fixed.get("spans", [])
-            if len(spans) > 1:
+            if supported_plan and len(spans) > 1:
                 flags.append("visibility_gaps")
             if spans:
                 last_start, last_end = spans[-1]
                 metrics["last_visible_span_active_seconds"] = active_seconds(report, last_start, last_end)
                 gap = active_seconds(report, last_end, hit)
                 metrics["last_visible_to_hit_gap_seconds"] = gap
-                if gap > margin:
+                if supported_plan and gap > margin:
                     flags.append("not_visible_near_hit")
             # A first visible quad wholly inside the viewport indicates a pop-in
             # candidate, not proof: authored alpha events can intentionally do this.
             quads = fixed["first_sample"].get("quads", [])
-            if quads and all(abs(v) < 0.97 for q in quads for p in q["ndc"] for v in p):
+            if supported_plan and quads and all(abs(v) < 0.97 for q in quads for p in q["ndc"] for v in p):
                 flags.append("screen_interior_appearance_candidate")
-        elif base.get("visible_frames", 0):
+        elif supported_plan and base.get("visible_frames", 0):
             flags.append("no_fixed_visibility_baseline_visible")
-        else:
+        elif supported_plan:
             flags.append("both_modes_unobserved")
         base_speed = float(base.get("max_center_step_per_real_second", 0.0))
         fixed_speed = float(fixed.get("max_center_step_per_real_second", 0.0))
         metrics.update({"baseline_peak_center_speed_ndc_s": base_speed, "fixed_peak_center_speed_ndc_s": fixed_speed})
-        if base_speed > 1e-7:
+        if supported_plan and base_speed > 1e-7:
             ratio = fixed_speed / base_speed
             metrics["peak_center_speed_ratio"] = ratio
             if ratio > 2.0:

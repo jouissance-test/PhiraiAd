@@ -56,7 +56,17 @@ class WorkflowTests(unittest.TestCase):
         report["solver"][0].update(plan="gate_only", reason="gate_only")
         self.assertNotIn("solver_fallback", workflow.analyze(report)["counts"])
         report["solver"][0].update(plan="original", reason="visibility_interval_rejected")
-        self.assertEqual(workflow.analyze(report)["counts"]["solver_fallback"], 1)
+        summary = workflow.analyze(report)
+        self.assertEqual(summary["counts"]["solver_fallback"], 1)
+        self.assertNotIn("preview_timing_mismatch", summary["counts"])
+        self.assertNotIn("fallback_visual_mismatch", summary["counts"])
+
+    def test_original_plan_must_preserve_baseline_visible_behavior(self):
+        report = fixture()
+        report["solver"][0].update(plan="original", reason="visibility_interval_rejected")
+        report["modes"]["fixed"]["notes"][0]["spans"] = [[9.7, 9.995]]
+        summary = workflow.analyze(report)
+        self.assertEqual(summary["counts"]["fallback_visual_mismatch"], 1)
 
     def test_behavior_case_can_require_a_supported_plan(self):
         report = fixture()
