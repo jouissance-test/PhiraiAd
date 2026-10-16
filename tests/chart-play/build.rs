@@ -78,6 +78,18 @@ fn main() {
     let mode = &source[source.find("#[derive(PartialEq, Eq)]").unwrap()..state];
     let pause = &source[source.find("    /// All button/automatic pauses").unwrap()..source.find("    fn sync_auto_flip(").unwrap()];
     std::fs::write(out.join("pause_resume.rs"), format!("impl GameScene {{ {pause} }}")).unwrap();
+    // Exercise the production fixed-preview cache key and synchronization path
+    // with a recording Chart adapter in fixed_preview_hot_reload.rs.
+    let key_start = source
+        .find("#[derive(Clone, Copy, Debug, PartialEq)]\nstruct FixedPreviewKey {")
+        .or_else(|| source.find("#[derive(Clone, Copy, Debug, PartialEq)]\r\nstruct FixedPreviewKey {"))
+        .unwrap();
+    let key_end = source[key_start..].find("\npub struct GameScene {").unwrap() + key_start;
+    let key = &source[key_start..key_end];
+    let sync_start = source.find("    fn fixed_preview_supported(&self) -> bool {").unwrap();
+    let sync_end = source[sync_start..].find("    fn report_mode(").unwrap() + sync_start;
+    let sync = &source[sync_start..sync_end];
+    std::fs::write(out.join("fixed_preview_hot_reload.rs"), format!("{key}\nimpl GameScene {{ {sync} }}")).unwrap();
     let begin = source.find("                    let result = self.judge.result();").unwrap();
     let gate = &source[begin..source[begin..].find("                    self.next_scene = match self.mode").unwrap() + begin];
     std::fs::write(

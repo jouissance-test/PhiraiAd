@@ -16,14 +16,16 @@ impl Music{
  fn play(&mut self)->Result<()>{self.paused=false;Ok(())}fn position(&self)->f64{self.at}
  fn seek_to(&mut self,t:f64)->Result<()>{self.at=t;Ok(())}fn preserves_pitch(&self)->bool{self.pitch}
 }
+struct Chart{offset:f64}
 struct Resource{config:config::Config,time:f64}
-struct GameScene{res:Resource,music:Music,mode:GameMode,state:State,exercise_range:std::ops::Range<f64>,exercise_state_reset_pending:bool,pause_rewind:Option<f64>,reset:Option<f64>}
+struct GameScene{res:Resource,music:Music,chart:Chart,info_offset:f64,correct_sound_events:Option<()>,mode:GameMode,state:State,exercise_range:std::ops::Range<f64>,exercise_state_reset_pending:bool,pause_rewind:Option<f64>,reset:Option<f64>}
 impl GameScene{
- fn new_music(res:&mut Resource,_:&GameMode)->Result<Music>{Ok(Music{at:0.,paused:true,pitch:res.config.practice_preserve_pitch})}
+ fn new_music(res:&mut Resource,mode:&GameMode,_:&Option<()>,_offset:f64)->Result<Music>{Ok(Music{at:0.,paused:true,pitch:res.config.preserve_pitch_for(*mode==GameMode::Exercise)})}
+ fn begin_armed_replay(&mut self){}
  fn reset_exercise_judgement_to(&mut self,t:f64){self.reset=Some(t);}
 }
 include!(concat!(env!("OUT_DIR"),"/pause_resume.rs"));
-fn scene()->GameScene{GameScene{res:Resource{config:config::Config::default(),time:5.},music:Music{at:5.,paused:false,pitch:false},mode:GameMode::Normal,state:State::Playing,exercise_range:0. ..10.,exercise_state_reset_pending:false,pause_rewind:None,reset:None}}
+fn scene()->GameScene{GameScene{res:Resource{config:config::Config::default(),time:5.},music:Music{at:5.,paused:false,pitch:false},chart:Chart{offset:0.},info_offset:0.,correct_sound_events:None,mode:GameMode::Normal,state:State::Playing,exercise_range:0. ..10.,exercise_state_reset_pending:false,pause_rewind:None,reset:None}}
 #[test]fn automatic_pause_freezes_then_uses_exact_boundary_and_original_count_in(){
  let wall=Rc::new(Cell::new(0.));let w=wall.clone();let mut tm=TimeManager::manual(Box::new(move||w.get()));tm.seek_to(5.);
  let mut g=scene();let mut j=Judge{clears:0};GameScene::pause_playback(&mut g.music,&mut tm,&mut j,TouchDebugClearSource::AutoFlipTransition).unwrap();
