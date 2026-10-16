@@ -130,6 +130,7 @@ pub enum ChallengeEvent {
 struct FixedPreviewKey {
     seconds: f32,
     playback_rate: f32,
+    original_flow: f32,
     aspect_ratio: f32,
     viewport: (i32, i32, i32, i32),
     practice_view: crate::practice_view::PracticeView,
@@ -853,6 +854,7 @@ impl GameScene {
         let key = (self.fixed_preview_supported() && self.res.config.fixed_preview_time_enabled).then(|| FixedPreviewKey {
             seconds: self.res.config.fixed_preview_seconds(),
             playback_rate: self.res.config.speed,
+            original_flow: self.res.note_flow_speed,
             aspect_ratio: self.res.aspect_ratio,
             viewport: self.res.last_vp,
             practice_view: self.res.practice_view,

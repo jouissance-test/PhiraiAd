@@ -84,6 +84,7 @@ struct Resource {
     last_vp: (i32, i32, i32, i32),
     practice_view: practice_view::PracticeView,
     note_width: f32,
+    note_flow_speed: f32,
     res_pack: ResPack,
     fixed_preview_chart_time: Option<f64>,
     time: f64,
@@ -156,6 +157,7 @@ fn scene() -> GameScene {
             last_vp: (0, 0, 1920, 1080),
             practice_view: practice_view::PracticeView::default(),
             note_width: 1.,
+            note_flow_speed: 1.,
             res_pack: ResPack {
                 info: ResPackInfo { hold_compact: false },
             },
@@ -243,4 +245,16 @@ fn disabling_clears_cache_and_reenabling_rebuilds_it() {
     assert_eq!(game.chart.rebuild_horizons.len(), 2);
     assert_eq!(game.chart.clear_count, 1);
     assert!((game.res.fixed_preview_chart_time.unwrap() - 0.4).abs() < 1e-7);
+}
+
+#[test]
+fn changing_effective_original_flow_invalidates_all_preview_plans() {
+    let mut game = scene();
+    game.sync_fixed_preview();
+    assert_eq!(game.chart.rebuild_horizons.len(), 1);
+    game.res.note_flow_speed = 2.;
+    game.sync_fixed_preview();
+    assert_eq!(game.chart.rebuild_horizons.len(), 2);
+    game.sync_fixed_preview();
+    assert_eq!(game.chart.rebuild_horizons.len(), 2);
 }

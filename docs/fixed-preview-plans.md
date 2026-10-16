@@ -6,7 +6,7 @@
 - `Constant { flow, start }`：原始 flow 不满足区间要求，目标点二分候选通过完整区间验证后才采用；目标前隐藏。
 - `Original { original_flow, reason }`：不可靠或不支持时恢复原始 flow 和原始显隐，完全不施加 Fixed Preview 时间门。fake Note 始终使用此计划。
 
-选择顺序为 GateOnly → Constant → Original。Hold 的 head/body/tail 使用同一份计划。现有暂停、改速、改预判、视口变化等缓存失效机制继续负责重建。
+选择顺序为 GateOnly → Constant → Original。Hold 的 head/body/tail 使用同一份计划。现有暂停、改速、改预判、视口变化等缓存失效机制继续负责重建；缓存键额外包含当前有效原始 flow。Original getter 始终读取当前 fallback flow，保留回退原因，避免设置变化与下次缓存同步之间固化旧速度。
 
 验证最多检查两个候选。每个候选以现实秒 240Hz 的最大间隔检查 target、区间内部和 hit 左极限，每个候选最多 1537 次几何查询；二分额外最多 18 次。超过 1536 步的区间恢复 Original。可提前在第一个不可见样本处拒绝。这是有明确预算的采样验证，不能证明任意小于约 4.17ms 的显隐事件不会落在采样之间，也不是多段或动态 flow 求解。
 

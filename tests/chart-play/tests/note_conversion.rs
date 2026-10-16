@@ -24,6 +24,17 @@ mod core {
   for &i in &line.cache.below_indices{assert!(line.notes[i].plain()&&!line.notes[i].above);}
  }
 }
+#[test]
+fn original_preview_fallback_uses_current_flow_without_reinstalling_a_gate(){
+ use core::*; use crate::fixed_preview_policy::{PreviewPlan,FallbackReason};
+ let mut notes=Vec::new();let mut cache=JudgeLineCache::new(&mut notes);
+ cache.set_fixed_preview_plans(vec![PreviewPlan::original(1.,FallbackReason::VisibilityGap)]);
+ let plan=cache.fixed_preview_plan(0,2.);
+ assert_eq!(plan,PreviewPlan::original(2.,FallbackReason::VisibilityGap));
+ assert_eq!(cache.fixed_preview_flow(0,2.),2.);assert!(!plan.hides(false,-100.));
+ cache.set_fixed_preview_plans(vec![]);
+ assert_eq!(cache.fixed_preview_plan(0,0.7),PreviewPlan::original(0.7,FallbackReason::Disabled));
+}
 #[test]fn repeated_conversions_rebuild_real_render_cache_and_keep_original_identity_after_sorting(){
  use core::*;use chart_play::NoteConversion as Mode;use judge::HitSound;
  let kinds=[NoteKind::Click,NoteKind::Hold{end_time:5.,end_height:8.},NoteKind::Drag,NoteKind::Flick];

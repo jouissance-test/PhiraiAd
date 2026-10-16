@@ -160,10 +160,14 @@ impl JudgeLineCache {
     }
 
     pub(crate) fn fixed_preview_plan(&self, note: usize, fallback: f32) -> crate::fixed_preview_policy::PreviewPlan {
-        self.fixed_preview_plans
-            .get(note)
-            .copied()
-            .unwrap_or_else(|| crate::fixed_preview_policy::PreviewPlan::original(fallback, crate::fixed_preview_policy::FallbackReason::Disabled))
+        use crate::fixed_preview_policy::{FallbackReason, PreviewPlan};
+        match self.fixed_preview_plans.get(note).copied() {
+            // Fallback means the current original visual, including a changed
+            // global/practice flow before the next plan-cache synchronization.
+            Some(PreviewPlan::Original { reason, .. }) => PreviewPlan::original(fallback, reason),
+            Some(plan) => plan,
+            None => PreviewPlan::original(fallback, FallbackReason::Disabled),
+        }
     }
 
     pub(crate) fn fixed_preview_flow(&self, note: usize, fallback: f32) -> f32 {
