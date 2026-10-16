@@ -135,6 +135,8 @@ impl Options {
 struct Sample {
     chart_time: f64,
     real_time: f64,
+    active_real_time: f64,
+    settings_segment: usize,
     quads: Vec<Quad>,
     center: [f32; 2],
 }
@@ -153,9 +155,58 @@ struct NoteStats {
     max_center_step_ndc: f32,
     max_center_step_per_real_second: f64,
     max_step_samples: Option<[Sample; 2]>,
+    max_speed_samples: Option<[Sample; 2]>,
+    transition_jumps: Vec<Value>,
+    max_transition_step_ndc: f32,
     topology_changes: usize,
     #[serde(skip)]
     previous_frame: Option<usize>,
+}
+
+/// Independent distance and velocity peaks. Scenario boundaries are explicit
+/// discontinuities and never compete with continuous motion measurements.
+fn record_motion(state: &mut NoteStats, sample: &Sample, contiguous: bool) {
+    let Some(previous) = state.last_sample.as_ref().filter(|_| contiguous) else {
+        return;
+    };
+    let step = ((sample.center[0] - previous.center[0]).powi(2) + (sample.center[1] - previous.center[1]).powi(2)).sqrt();
+    let active_dt = sample.active_real_time - previous.active_real_time;
+    if previous.quads.len() != sample.quads.len() {
+        state.topology_changes += 1;
+    }
+    if previous.settings_segment != sample.settings_segment {
+        state.max_transition_step_ndc = state.max_transition_step_ndc.max(step);
+        state.transition_jumps.push(json!({"from":previous,"to":sample,"step_ndc":step,"elapsed_real_seconds":sample.real_time-previous.real_time,"active_real_seconds":active_dt,"from_segment":previous.settings_segment,"to_segment":sample.settings_segment}));
+        return;
+    }
+    if step > state.max_center_step_ndc {
+        state.max_center_step_ndc = step;
+        state.max_step_samples = Some([previous.clone(), sample.clone()]);
+    }
+    if active_dt > 0. {
+        let speed = step as f64 / active_dt;
+        if speed > state.max_center_step_per_real_second {
+            state.max_center_step_per_real_second = speed;
+            state.max_speed_samples = Some([previous.clone(), sample.clone()]);
+        }
+    }
+}
+
+fn calibrated_summary(calibration: &Value, modes: &BTreeMap<&str, Value>, note_count: usize, solver: &[Value], segments: usize) -> Result<Value> {
+    anyhow::ensure!(calibration.get("passed").and_then(Value::as_bool) == Some(true), "Refusing summary/report: renderer calibration did not pass");
+    let mut reason_counts = BTreeMap::<&str, usize>::new();
+    for note in solver {
+        *reason_counts.entry(note["reason"].as_str().unwrap_or("unknown")).or_default() += 1;
+    }
+    let mut mode_summary = BTreeMap::new();
+    for (name, mode) in modes {
+        let notes = mode["notes"].as_array().context("Invalid mode notes for summary")?;
+        let visible_notes = notes.iter().filter(|n| n["visible_frames"].as_u64().unwrap_or(0) > 0).count();
+        mode_summary.insert(name, json!({"frames":mode["frames"],"submitted_note_entries":notes.len(),"visible_notes":visible_notes,"notes_without_visible_samples":note_count-visible_notes,"visible_note_frames":notes.iter().map(|n|n["visible_frames"].as_u64().unwrap_or(0)).sum::<u64>(),"transition_jump_count":notes.iter().map(|n|n["transition_jumps"].as_array().map_or(0,Vec::len)).sum::<usize>()}));
+    }
+    Ok(
+        json!({"calibration_passed":true,"pre_hit_only":true,"note_count":note_count,"initial_solver_reason_counts":reason_counts,"solver_segments_count":segments,"modes":mode_summary}),
+    )
 }
 
 // Independent polygon clipping of the submitted quads. This does not call the
@@ -318,7 +369,10 @@ async fn run(options: Options) -> Result<()> {
                 .map(move |(ni, n)| json!({"line":li,"note":ni,"time":n.time,"fake":n.fake,"kind":format!("{:?}",n.kind),"above":n.above}))
         })
         .collect();
-    let solver = chart.audit_preview_solver(&res, options.preview * options.speed);
+    let solver = chart.audit_preview_solver(&res, options.preview * res.config.speed as f64);
+    let mut solver_segments = vec![
+        json!({"segment_index":0,"applied_chart_time":options.start,"preview_real_seconds":options.preview,"speed":res.config.speed,"preview_chart_seconds":options.preview*res.config.speed as f64,"solver":solver}),
+    ];
     let mut modes = BTreeMap::new();
     let mut frame_file = options.frames.as_ref().map(std::fs::File::create).transpose()?.map(BufWriter::new);
     let mut event_log = Vec::new();
@@ -327,7 +381,8 @@ async fn run(options: Options) -> Result<()> {
         chart.reset();
         res.config.speed = options.speed as f32;
         let mut preview = options.preview;
-        render_audit::configure(&mut chart, &mut res, fixed.then_some(preview * options.speed));
+        let initial_preview_chart = preview * res.config.speed as f64;
+        render_audit::configure(&mut chart, &mut res, fixed.then_some(initial_preview_chart));
         let mut stats: BTreeMap<(usize, usize), NoteStats> = BTreeMap::new();
         let mut chart_time = options.start;
         let mut real_time = 0.;
@@ -345,6 +400,9 @@ async fn run(options: Options) -> Result<()> {
                 real_time += event.pause_real_seconds;
                 let preview_chart = preview * res.config.speed as f64;
                 render_audit::configure(&mut chart, &mut res, fixed.then_some(preview_chart));
+                if fixed {
+                    solver_segments.push(json!({"segment_index":event_index+1,"applied_chart_time":chart_time,"preview_real_seconds":preview,"speed":res.config.speed,"preview_chart_seconds":preview_chart,"solver":chart.audit_preview_solver(&res,preview_chart)}));
+                }
                 event_log.push(json!({"mode":name,"event":event,"applied_chart_time":chart_time,"real_time":real_time,"old_speed":old_speed,"new_speed":res.config.speed,"preview_chart_seconds":preview*res.config.speed as f64,"coverage":"render_cache_rebuild_only"}));
                 event_index += 1;
             }
@@ -390,6 +448,8 @@ async fn run(options: Options) -> Result<()> {
                 let sample = Sample {
                     chart_time,
                     real_time,
+                    active_real_time: frame as f64 / options.hz,
+                    settings_segment: event_index,
                     quads,
                     center,
                 };
@@ -403,17 +463,7 @@ async fn run(options: Options) -> Result<()> {
                 }
                 let real_span = state.spans_real.last().unwrap();
                 state.longest_contiguous_visible_real_seconds = state.longest_contiguous_visible_real_seconds.max(real_span[1] - real_span[0]);
-                if let Some(previous) = state.last_sample.as_ref().filter(|_| contiguous) {
-                    if previous.quads.len() != sample.quads.len() {
-                        state.topology_changes += 1;
-                    }
-                    let step = ((center[0] - previous.center[0]).powi(2) + (center[1] - previous.center[1]).powi(2)).sqrt();
-                    if step > state.max_center_step_ndc {
-                        state.max_center_step_ndc = step;
-                        state.max_center_step_per_real_second = step as f64 / (real_time - previous.real_time);
-                        state.max_step_samples = Some([previous.clone(), sample.clone()]);
-                    }
-                }
+                record_motion(state, &sample, contiguous);
                 state.visible_frames += 1;
                 state.previous_frame = Some(frame);
                 if state.first_sample.is_none() {
@@ -439,8 +489,13 @@ async fn run(options: Options) -> Result<()> {
     if let Some(file) = &mut frame_file {
         file.flush()?;
     }
+    let summary = calibrated_summary(&calibration, &modes, note_metadata.len(), &solver, solver_segments.len())?;
     let report = json!({"schema_version":1,"calibration":calibration,"metadata":{"chart":options.chart,"chart_sha256":chart_hash,"chart_format":format!("{:?}",format),"chart_name":res.info.name,"viewport":[options.width,options.height],"effective_aspect_ratio":res.aspect_ratio,"preview_real_seconds":options.preview,"speed":options.speed,"preview_chart_seconds":options.preview*options.speed,"start_chart_time":options.start,"end_chart_time":end,"hz_real":options.hz,"scenario":options.scenario,"metrics_scope":"pre_hit_only: chart_time <= note.time; raw --frames includes all submitted quads","renderer":"production parse -> Chart::update -> JudgeLine::render -> Note::render -> draw_tex_pts -> NoteBuffer::push; WSLg hidden OpenGL","coverage_limitations":["No judgement/input/audio playback: notes retain NotJudged status; aggregate note metrics stop at hit time.","No shader/postprocessing/noise-area framebuffer or texture-alpha pixel readback; geometric visibility clips actual submitted alpha-nonzero quads.","Per-note capture excludes judge-line sprites, particles, HUD and bad-note effects. PracticeView and chart_post_view remain defaults and are not exercised.","Scenario events test render-cache rebuilding only; GameScene pause/resume state machine and its cache invalidation trigger are not exercised. Pauses add real-time duration without re-rendering frozen frames.","Fixed-time samples may miss sub-frame appearances; bounds use chart time, hz is real-time, preview_chart=preview_real*speed. Visibility spans touching scan bounds are censored.","Center-step values are candidates, not proof of bugs; Hold body topology can change naturally."]},"notes":note_metadata,"solver":solver,"scenario_events":event_log,"modes":modes});
     let mut report = report;
+    report["solver_segments"] = json!(solver_segments);
+    report["summary"] = summary;
+    report["metadata"]["calibration_passed"] = json!(true);
+    report["metadata"]["summary_valid"] = json!(true);
     let mut pack_files: Vec<_> = std::fs::read_dir(options.assets.join("respack"))?
         .map(|entry| entry.map(|e| e.path()))
         .collect::<std::io::Result<_>>()?;
@@ -497,4 +552,72 @@ fn main() {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod metric_tests {
+    use super::*;
+
+    fn sample(center: f32, elapsed: f64, active: f64, segment: usize) -> Sample {
+        Sample {
+            chart_time: active,
+            real_time: elapsed,
+            active_real_time: active,
+            settings_segment: segment,
+            quads: Vec::new(),
+            center: [center, 0.],
+        }
+    }
+    fn advance(state: &mut NoteStats, next: Sample) {
+        record_motion(state, &next, true);
+        state.last_sample = Some(next);
+    }
+
+    #[test]
+    fn smaller_step_can_set_independent_peak_velocity() {
+        let mut state = NoteStats::default();
+        state.last_sample = Some(sample(0., 0., 0., 0));
+        advance(&mut state, sample(1., 100., 100., 0));
+        advance(&mut state, sample(1.2, 100.01, 100.01, 0));
+        assert_eq!(state.max_center_step_ndc, 1.);
+        assert!((state.max_center_step_per_real_second - 20.).abs() < 1e-4);
+        assert_eq!(state.max_step_samples.as_ref().unwrap()[1].center[0], 1.);
+        assert_eq!(state.max_speed_samples.as_ref().unwrap()[1].center[0], 1.2);
+    }
+
+    #[test]
+    fn pause_setting_transition_is_separate_and_velocity_uses_active_clock() {
+        let mut state = NoteStats::default();
+        state.last_sample = Some(sample(0., 0., 0., 0));
+        advance(&mut state, sample(1., 100.1, 0.1, 1));
+        assert_eq!(state.max_center_step_ndc, 0.);
+        assert_eq!(state.max_center_step_per_real_second, 0.);
+        assert_eq!(state.transition_jumps.len(), 1);
+        assert_eq!(state.max_transition_step_ndc, 1.);
+        advance(&mut state, sample(1.2, 100.2, 0.2, 1));
+        advance(&mut state, sample(1.3, 100.21, 0.21, 1));
+        assert!((state.max_center_step_ndc - 0.2).abs() < 1e-6);
+        assert!((state.max_center_step_per_real_second - 10.).abs() < 1e-4);
+        assert_eq!(state.max_speed_samples.as_ref().unwrap()[1].settings_segment, 1);
+        // Elapsed time includes an extra injected freeze; active dt still wins.
+        advance(&mut state, sample(1.5, 150.22, 0.22, 1));
+        assert!((state.max_center_step_per_real_second - 20.).abs() < 1e-4);
+    }
+
+    #[test]
+    fn missing_frame_never_creates_continuous_or_transition_motion() {
+        let mut state = NoteStats::default();
+        state.last_sample = Some(sample(0., 0., 0., 0));
+        record_motion(&mut state, &sample(10., 2., 2., 1), false);
+        assert_eq!(state.max_center_step_ndc, 0.);
+        assert!(state.transition_jumps.is_empty());
+    }
+
+    #[test]
+    fn summary_fails_closed_without_explicit_successful_calibration() {
+        for calibration in [json!({"passed":false}), json!({}), Value::Null] {
+            assert!(calibrated_summary(&calibration, &BTreeMap::new(), 0, &[], 1).is_err());
+        }
+        assert_eq!(calibrated_summary(&json!({"passed":true}), &BTreeMap::new(), 0, &[], 1).unwrap()["calibration_passed"], true);
+    }
 }
