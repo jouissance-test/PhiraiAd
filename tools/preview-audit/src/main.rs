@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
-    io::{BufWriter, Write},
+    io::{BufWriter, Read, Write},
     path::PathBuf,
 };
 
@@ -194,6 +194,21 @@ fn visible(q: &Quad) -> bool {
             .sum::<f32>()
             .abs()
             > 1e-12
+}
+
+fn file_identity(path: &std::path::Path) -> Result<Value> {
+    let mut file = std::fs::File::open(path)?;
+    let bytes = file.metadata()?.len();
+    let mut hash = Sha256::new();
+    let mut chunk = [0u8; 65536];
+    loop {
+        let count = file.read(&mut chunk)?;
+        if count == 0 {
+            break;
+        }
+        hash.update(&chunk[..count]);
+    }
+    Ok(json!({"path":path,"bytes":bytes,"sha256":format!("{:x}",hash.finalize())}))
 }
 
 fn capture_frame(
@@ -406,8 +421,12 @@ async fn run(options: Options) -> Result<()> {
                 }
                 state.last_sample = Some(sample);
             }
-            // Flush each fixed-time render, avoiding an ever-growing GL queue.
-            unsafe { get_internal_gl() }.flush();
+            // Production line/note/batch geometry has now been submitted and
+            // observed. Pixel rasterization is not an oracle for this geometric
+            // scan; discard the queued GL commands instead of rendering 80k
+            // full viewports through a software Mesa driver. Calibration above
+            // does rasterize its known fixture with flush().
+            unsafe { get_internal_gl() }.quad_gl.clear_draw_calls();
             if frame % 600 == 0 {
                 eprintln!("{name}: chart={chart_time:.3}/{end:.3} frame={frame}");
             }
@@ -421,6 +440,24 @@ async fn run(options: Options) -> Result<()> {
         file.flush()?;
     }
     let report = json!({"schema_version":1,"calibration":calibration,"metadata":{"chart":options.chart,"chart_sha256":chart_hash,"chart_format":format!("{:?}",format),"chart_name":res.info.name,"viewport":[options.width,options.height],"effective_aspect_ratio":res.aspect_ratio,"preview_real_seconds":options.preview,"speed":options.speed,"preview_chart_seconds":options.preview*options.speed,"start_chart_time":options.start,"end_chart_time":end,"hz_real":options.hz,"scenario":options.scenario,"metrics_scope":"pre_hit_only: chart_time <= note.time; raw --frames includes all submitted quads","renderer":"production parse -> Chart::update -> JudgeLine::render -> Note::render -> draw_tex_pts -> NoteBuffer::push; WSLg hidden OpenGL","coverage_limitations":["No judgement/input/audio playback: notes retain NotJudged status; aggregate note metrics stop at hit time.","No shader/postprocessing/noise-area framebuffer or texture-alpha pixel readback; geometric visibility clips actual submitted alpha-nonzero quads.","Per-note capture excludes judge-line sprites, particles, HUD and bad-note effects. PracticeView and chart_post_view remain defaults and are not exercised.","Scenario events test render-cache rebuilding only; GameScene pause/resume state machine and its cache invalidation trigger are not exercised. Pauses add real-time duration without re-rendering frozen frames.","Fixed-time samples may miss sub-frame appearances; bounds use chart time, hz is real-time, preview_chart=preview_real*speed. Visibility spans touching scan bounds are censored.","Center-step values are candidates, not proof of bugs; Hold body topology can change naturally."]},"notes":note_metadata,"solver":solver,"scenario_events":event_log,"modes":modes});
+    let mut report = report;
+    let mut pack_files: Vec<_> = std::fs::read_dir(options.assets.join("respack"))?
+        .map(|entry| entry.map(|e| e.path()))
+        .collect::<std::io::Result<_>>()?;
+    pack_files.sort();
+    let pack_manifest: Vec<_> = pack_files
+        .iter()
+        .filter(|p| p.is_file())
+        .map(|p| file_identity(p))
+        .collect::<Result<_>>()?;
+    report["metadata"]["assets_root"] = json!(std::fs::canonicalize(&options.assets)?);
+    report["metadata"]["chart_viewport"] = json!(res.camera.viewport);
+    report["metadata"]["baseline_note_flow_speed"] = json!(res.note_flow_speed);
+    report["metadata"]["note_width"] = json!(res.note_width);
+    report["metadata"]["resource_pack_manifest"] = json!(pack_manifest);
+    report["metadata"]["engine"] = file_identity(&std::env::current_exe()?)?;
+    report["metadata"]["rasterization"] = json!("Calibration submits to OpenGL; scan samples execute production geometry and discard queued GPU draws after capture. No per-frame pixel readback.");
+    report["metadata"]["real_time_origin"] = json!("0 at scan start; includes injected pause duration");
     if let Some(parent) = options.out.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)?;
     }

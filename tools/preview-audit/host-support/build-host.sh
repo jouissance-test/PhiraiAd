@@ -12,5 +12,8 @@ for spec in 'asound:libasound.so.2' 'wayland-client:libwayland-client.so.0' 'way
   if [[ ! -e "$audit_support/lib/lib$audit_name.so" ]]; then ln -s "$audit_source" "$audit_support/lib/lib$audit_name.so"; fi
 done
 export PKG_CONFIG_PATH="$audit_support/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+# Production loops visit millions of animated Notes; workspace crates otherwise
+# use opt-level=0 even though third-party dependencies already use opt-level=2.
+export CARGO_PROFILE_DEV_OPT_LEVEL="${CARGO_PROFILE_DEV_OPT_LEVEL:-2}"
 cd "$audit_root"
 cargo build --offline -p phira-preview-audit "$@"

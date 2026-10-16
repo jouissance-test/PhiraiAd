@@ -33,6 +33,10 @@ pub(crate) fn silent_audio() -> bool {
     CAPTURE.with(|c| c.borrow().silent_audio)
 }
 
+pub(crate) fn capturing() -> bool {
+    CAPTURE.with(|c| c.borrow().enabled)
+}
+
 /// Keep the receiver alive while Resource creates its three unused sound effects.
 /// This backend is used only by the explicit audit executable, which never plays.
 #[derive(Default)]

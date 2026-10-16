@@ -415,7 +415,10 @@ impl NoteBuffer {
 
     pub fn draw_all(&mut self) {
         let mut gl = unsafe { get_internal_gl() };
+        #[cfg(not(feature = "render-audit"))]
         gl.flush();
+        #[cfg(feature = "render-audit")]
+        if !crate::render_audit::capturing() { gl.flush(); }
         let gl = gl.quad_gl;
         gl.draw_mode(DrawMode::Triangles);
         // Keep both the sorted texture groups and mesh capacities between draws.
