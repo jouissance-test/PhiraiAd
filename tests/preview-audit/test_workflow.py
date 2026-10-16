@@ -121,17 +121,19 @@ class WorkflowTests(unittest.TestCase):
 
     def test_scenario_uses_corresponding_solver_segment(self):
         report = fixture(9.8)
-        report["metadata"]["scenario"] = [{"at": 8.1, "preview": 0.2}]
+        report["metadata"]["scenario"] = [{"at": 9.9, "preview": 0.2}]
         changed = {"line": 0, "note": 0, "plan": "constant", "reason": "solved", "flow": 6.0}
         report["solver"][0].update(plan="original", reason="minimum_not_visible")
-        report["solver_segments"] = [{"applied_chart_time": 8.0, "solver": report["solver"]}, {"applied_chart_time": 8.1, "solver": [changed]}]
+        report["solver_segments"] = [{"applied_chart_time": 8.0, "solver": report["solver"]}, {"applied_chart_time": 9.9, "solver": [changed]}]
         # Force a candidate so the selected solver identity is inspectable.
         report["modes"]["fixed"]["notes"][0]["max_center_step_per_real_second"] = 10
+        report["modes"]["fixed"]["notes"][0]["spans"] = [[9.8, 9.85], [9.9, 9.995]]
         note = workflow.analyze(report)["findings"][0]
         self.assertEqual(note["flow"], 6.0)
         self.assertEqual(note["solver_plan"], "constant")
         self.assertEqual(note["solver_reason"], "solved")
         self.assertNotIn("solver_fallback", note["flags"])
+        self.assertNotIn("visibility_gaps", note["flags"])
 
     def test_comparison_refuses_changed_sampling_or_resources(self):
         old = workflow.analyze(fixture())

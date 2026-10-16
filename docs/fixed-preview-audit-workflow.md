@@ -93,7 +93,7 @@ Linux 下同样使用该 Python 脚本，只需传 Linux 绝对路径。默认�
 
 `solver_fallback`、`preview_timing_mismatch`、`visibility_gaps`、`not_visible_near_hit`、`no_fixed_visibility_baseline_visible` 是可量化现象；`speed_amplification_candidate` 与 `screen_interior_appearance_candidate` 只是优先排查线索。谱面有意显隐、Hold 的几何形状变化都可能产生候选，不可把所有 flag 数量当作已确认 Bug 数量。
 
-预判误差默认容差为 `max(20ms, 2/hz)`。只分析判定前的几何数据，避免未执行判定导致命中后的继续绘制污染指标。扫描边界截断首次出现时标记 censored；零 eligible Note 是覆盖不足而不是通过。不同播放速度下按分段 `chart_delta / speed` 计算 active 可读时长，主动暂停不计入预判时长。
+预判误差默认容差为 `max(20ms, 2/hz)`。只分析判定前的几何数据，避免未执行判定导致命中后的继续绘制污染指标。扫描边界截断首次出现时标记 censored；零 eligible Note 是覆盖不足而不是通过。不同播放速度下按分段 `chart_delta / speed` 计算 active 可读时长，主动暂停不计入预判时长。设置事件后的过渡窗口不判定统一时长、可见 gaps 或 near-hit 缺口，因为它的轨迹由两个有效计划拼接；过渡窗口以外仍按当前分段计划严格验收。
 
 比较两轮同配置摘要：
 

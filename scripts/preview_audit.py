@@ -161,14 +161,14 @@ def analyze(report, tolerance=0.020):
             if supported_plan and not transition and not first_censored and abs(observed - preview) > margin:
                 flags.append("preview_timing_mismatch")
             spans = fixed.get("spans", [])
-            if supported_plan and len(spans) > 1:
+            if supported_plan and not transition and len(spans) > 1:
                 flags.append("visibility_gaps")
             if spans:
                 last_start, last_end = spans[-1]
                 metrics["last_visible_span_active_seconds"] = active_seconds(report, last_start, last_end)
                 gap = active_seconds(report, last_end, hit)
                 metrics["last_visible_to_hit_gap_seconds"] = gap
-                if supported_plan and gap > margin:
+                if supported_plan and not transition and gap > margin:
                     flags.append("not_visible_near_hit")
             # A first visible quad wholly inside the viewport indicates a pop-in
             # candidate, not proof: authored alpha events can intentionally do this.
