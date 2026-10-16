@@ -103,6 +103,44 @@ pub struct SliderSpec {
     pub suffix: &'static str,
 }
 
+/// Frame-rate-independent repeat timing for the +/- buttons on practice sliders.
+/// The first repeat happens after a short hold; subsequent repeats accelerate
+/// smoothly, from about seven to twenty-two steps per second.
+#[derive(Clone, Copy, Debug)]
+pub struct HoldRepeat {
+    next_repeat_at: f32,
+}
+
+impl Default for HoldRepeat {
+    fn default() -> Self {
+        Self { next_repeat_at: 0.35 }
+    }
+}
+
+impl HoldRepeat {
+    pub fn advance(&mut self, held_seconds: f32) -> u32 {
+        if !held_seconds.is_finite() || held_seconds < 0. {
+            return 0;
+        }
+        let mut repeats = 0;
+        while held_seconds >= self.next_repeat_at {
+            repeats += 1;
+            let acceleration = ((self.next_repeat_at - 0.35) / 2.0).clamp(0., 1.);
+            let interval = 0.14 - (0.14 - 0.045) * acceleration;
+            self.next_repeat_at += interval;
+        }
+        repeats
+    }
+}
+
+pub fn release_steps(repeated: bool) -> u32 {
+    if repeated { 0 } else { 1 }
+}
+
+pub fn adjust_repeated_value(value: f32, delta: f32, count: u32, min: f32, max: f32) -> f32 {
+    (value + delta * count as f32).clamp(min, max)
+}
+
 pub const SCALE: SliderSpec = SliderSpec {
     min: 5.,
     max: 500.,
@@ -172,6 +210,31 @@ mod tests {
         }
         assert_eq!(SCALE.drag_value(0.25), 53.);
         assert_eq!(SCALE.drag_value(0.75), 300.);
+    }
+
+    #[test]
+    fn hold_repeat_waits_then_accelerates_and_stops_at_release_boundary() {
+        let mut repeat = HoldRepeat::default();
+        assert_eq!(repeat.advance(0.20), 0);
+        assert_eq!(repeat.advance(0.349), 0);
+        assert_eq!(repeat.advance(0.35), 1);
+        let early = repeat.advance(0.75);
+        assert_eq!(early, 2);
+        let mut accelerated = HoldRepeat::default();
+        accelerated.advance(1.5);
+        let later = accelerated.advance(1.9);
+        assert!(later > early);
+        // A released control no longer calls advance; a fresh press starts with a fresh delay.
+        let mut after_release = HoldRepeat::default();
+        assert_eq!(after_release.advance(0.10), 0);
+        assert_eq!(release_steps(false), 1);
+        assert_eq!(release_steps(true), 0);
+    }
+
+    #[test]
+    fn repeated_value_clamps_at_both_limits() {
+        assert_eq!(adjust_repeated_value(0.101, -0.001, 20, 0.1, 0.75), 0.1);
+        assert_eq!(adjust_repeated_value(0.749, 0.001, 20, 0.1, 0.75), 0.75);
     }
 
     #[test]

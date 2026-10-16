@@ -667,6 +667,15 @@ impl Slider {
 
 thread_local! {
     static STATE: RefCell<HashMap<String, Option<u64>>> = RefCell::new(HashMap::new());
+    static HOLD_REPEAT_STATE: RefCell<HashMap<String, HoldRepeatButton>> = RefCell::new(HashMap::new());
+}
+
+#[derive(Clone, Copy, Default)]
+struct HoldRepeatButton {
+    id: Option<u64>,
+    started_at: f32,
+    repeat: crate::practice_view::HoldRepeat,
+    repeated: bool,
 }
 
 pub struct InputParams<'a> {
@@ -1334,8 +1343,52 @@ impl<'a> Ui<'a> {
                     .color(WHITE)
                     .no_baseline()
                     .draw();
-                if self.clicked(r, state.entry(format!("{input_id}:{suffix}")).or_default()) {
-                    *value = (*value + delta).clamp(spec.min, spec.max);
+                let button_id = format!("{input_id}:{suffix}");
+                let button_rect = self.rect_to_global(r);
+                let mut clicked = false;
+                HOLD_REPEAT_STATE.with(|states| {
+                    let mut states = states.borrow_mut();
+                    let button = states.entry(button_id.clone()).or_default();
+                    self.ensure_touches().retain(|touch| {
+                        let owned = button.id == Some(touch.id);
+                        match touch.phase {
+                            TouchPhase::Started if button.id.is_none() && button_rect.contains(touch.position) => {
+                                button.id = Some(touch.id);
+                                button.started_at = t;
+                                button.repeat = crate::practice_view::HoldRepeat::default();
+                                button.repeated = false;
+                                false
+                            }
+                            TouchPhase::Moved | TouchPhase::Stationary if owned => {
+                                if !button_rect.contains(touch.position) {
+                                    *button = HoldRepeatButton::default();
+                                }
+                                false
+                            }
+                            TouchPhase::Ended if owned => {
+                                if crate::practice_view::release_steps(button.repeated) > 0 && button_rect.contains(touch.position) {
+                                    clicked = true;
+                                }
+                                *button = HoldRepeatButton::default();
+                                false
+                            }
+                            TouchPhase::Cancelled if owned => {
+                                *button = HoldRepeatButton::default();
+                                false
+                            }
+                            _ => !button_rect.contains(touch.position),
+                        }
+                    });
+                    if let Some(_) = button.id {
+                        let count = button.repeat.advance(t - button.started_at);
+                        if count > 0 {
+                            button.repeated = true;
+                            *value = crate::practice_view::adjust_repeated_value(*value, delta, count, spec.min, spec.max);
+                        }
+                    }
+                });
+                if clicked {
+                    *value = crate::practice_view::adjust_repeated_value(*value, delta, crate::practice_view::release_steps(false), spec.min, spec.max);
                 }
                 x += button_size + gap;
             }
@@ -1359,6 +1412,13 @@ impl<'a> Ui<'a> {
                 for suffix in ["", ":drag", ":-", ":+"] {
                     state.remove(&format!("{id}{suffix}"));
                 }
+            }
+        });
+        HOLD_REPEAT_STATE.with(|state| {
+            let mut state = state.borrow_mut();
+            for id in ["exercise_speed", "exercise_note_flow", "exercise_extra", "exercise_view_scale", "exercise_view_x", "exercise_view_y", "fixed_preview_time"] {
+                state.remove(&format!("{id}:-"));
+                state.remove(&format!("{id}:+"));
             }
         });
     }
