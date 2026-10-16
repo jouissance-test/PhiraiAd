@@ -8,6 +8,7 @@
 - [module-dependencies.mmd](module-dependencies.mmd)：项目模块依赖图的 Mermaid 源码。
 - [fixed-preview-time-flow.mmd](fixed-preview-time-flow.mmd)：统一预判时间功能的内部流程图 Mermaid 源码。
 - [fixed-preview-time-development.md](../fixed-preview-time-development.md)：源码核查、实现 seam、求解算法、边界与当前验证记录。
+- [fixed-preview-audit-workflow.md](../fixed-preview-audit-workflow.md)：诊断统一预判异常、扩充谱库或验证修复时先读；提供生产渲染扫描、三档预判、暂停回归及已知 62 秒失败检查（不需要手机）。
 - [工作区功能需求说明](../../../功能实现说明.md)：统一预判时间的已定范围、算法约束和验收标准（位于仓库外的工作区根目录）。
 
 图文件是纯 Mermaid 文本，可粘贴到支持 Mermaid 的 Markdown、GitHub 或 Mermaid Live Editor 中渲染。

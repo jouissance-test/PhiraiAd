@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "description": "Known unresolved real-renderer regression: Waking Shadows 62 seconds, preview 450ms. Not an expected-green test until the motion bug is fixed.",
+  "chart_sha256": "d2bd1274cd67d9a47153368dd1c9b3b518b04c6beb41527aaff4bfc252e38e78",
+  "configuration": {"preview_real_seconds": 0.45, "speed": 1.0},
+  "minimum_hz": 120,
+  "notes": [
+    {"id": "waking-62-short-hold", "line": 4, "hit_chart_time": 62.24612883560251, "kind": "Hold"},
+    {"id": "waking-62-click", "line": 4, "hit_chart_time": 62.24612883560251, "kind": "Click"}
+  ]
+}
