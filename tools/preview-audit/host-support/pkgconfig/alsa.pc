@@ -1,0 +1,6 @@
+prefix=${pcfiledir}/..
+libdir=${prefix}/lib
+Name: alsa
+Description: Existing host ALSA runtime for renderer audit
+Version: 1.2.11
+Libs: -L${libdir} -lasound

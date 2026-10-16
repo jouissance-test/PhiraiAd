@@ -1,0 +1,5 @@
+[
+  {"at": 61, "pause_real_seconds": 1, "speed": 0.8, "preview": 0.2},
+  {"at": 62, "pause_real_seconds": 0.5, "speed": 1.2, "preview": 0.75},
+  {"at": 63, "speed": 1, "preview": 0.45}
+]

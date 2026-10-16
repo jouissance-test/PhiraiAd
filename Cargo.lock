@@ -3618,6 +3618,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "phira-preview-audit"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "macroquad",
+ "prpr",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+]
+
+[[package]]
 name = "pin-project-lite"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"

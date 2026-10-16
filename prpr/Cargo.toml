@@ -10,6 +10,7 @@ license = { workspace = true }
 default = ["log"]
 video = ["dep:prpr-avc"]
 log = ["dep:tracing-subscriber", "dep:colored"]
+render-audit = []
 
 [dependencies]
 anyhow = { workspace = true }

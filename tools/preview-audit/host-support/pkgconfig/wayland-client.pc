@@ -1,0 +1,6 @@
+prefix=${pcfiledir}/..
+libdir=${prefix}/lib
+Name: Wayland Client
+Description: Existing host Wayland client runtime for renderer audit
+Version: 1.22.0
+Libs: -L${libdir} -lwayland-client

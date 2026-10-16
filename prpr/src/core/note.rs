@@ -111,6 +111,8 @@ fn draw_tex_pts(res: &Resource, texture: Texture2D, order: i8, p: [Point; 4], co
     res.note_buffer
         .borrow_mut()
         .push((order, texture.raw_miniquad_texture_handle().gl_internal_id()), vertices);
+    #[cfg(feature = "render-audit")]
+    crate::render_audit::record_quad(res, &vertices);
 }
 
 fn draw_center(res: &Resource, tex: Texture2D, order: i8, scale: f32, color: Color) {
@@ -221,6 +223,8 @@ impl Note {
     /// Submit a render-only kind; judgement, reports and the chart keep self.kind.
     /// The drawing implementation below is the r14 renderer with a kind input.
     pub fn render(&self, res: &mut Resource, config: &mut RenderConfig, bpm_list: &mut BpmList, flow: f32) {
+        #[cfg(feature = "render-audit")]
+        crate::render_audit::set_note(self as *const Self as usize);
         let kind = if res.config.shorten_holds && !self.fake {
             if let NoteKind::Hold { end_time, .. } = self.kind {
                 let end_time = self.visual_end_time(res, end_time);

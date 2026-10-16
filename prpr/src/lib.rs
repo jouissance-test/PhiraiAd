@@ -22,6 +22,8 @@ pub mod practice_audio;
 pub mod practice_speed;
 pub mod practice_view;
 pub mod replay;
+#[cfg(feature = "render-audit")]
+pub mod render_audit;
 pub mod scene;
 pub mod task;
 pub mod time;

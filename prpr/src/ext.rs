@@ -420,6 +420,10 @@ pub fn screen_aspect() -> f32 {
 }
 // This function is used to create in-game audio manager
 pub fn create_audio_manger(config: &Config) -> Result<AudioManager> {
+    #[cfg(feature = "render-audit")]
+    if crate::render_audit::silent_audio() {
+        return AudioManager::new(crate::render_audit::SilentBackend::default());
+    }
     #[cfg(target_os = "android")]
     {
         use sasa::backend::oboe::*;

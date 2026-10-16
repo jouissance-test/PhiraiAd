@@ -289,6 +289,31 @@ fn note_quad_at(chart: &Chart, line_id: usize, note_id: usize, res: &Resource, t
 }
 
 impl Chart {
+    /// Host diagnostics expose the solver's bracket and decision separately from
+    /// the production renderer oracle. This never changes cached flows.
+    #[cfg(feature = "render-audit")]
+    pub fn audit_preview_solver(&self, res: &Resource, preview_chart_seconds: f64) -> Vec<serde_json::Value> {
+        self.lines.iter().enumerate().flat_map(|(line_id, line)| {
+            line.notes.iter().enumerate().map(move |(note_id, note)| {
+                let target = note.time - preview_chart_seconds;
+                let minimum = note_quad_at(self, line_id, note_id, res, target, NOTE_FLOW_SPEED_MIN);
+                let maximum = note_quad_at(self, line_id, note_id, res, target, NOTE_FLOW_SPEED_MAX);
+                let min_visible = minimum.is_some_and(quad_visible);
+                let max_visible = maximum.is_some_and(quad_visible);
+                let solved = if !note.fake && target >= 0. && target.is_finite() {
+                    solve_flow(|flow| note_quad_at(self, line_id, note_id, res, target, flow).is_some_and(quad_visible), NOTE_FLOW_SPEED_MIN, NOTE_FLOW_SPEED_MAX)
+                } else { None };
+                let reason = if note.fake { "fake_note_not_applicable" }
+                    else if !target.is_finite() || target < 0. { "target_before_chart_or_nonfinite" }
+                    else if minimum.is_none() { "no_geometry_at_minimum" }
+                    else if !min_visible { "minimum_not_visible" }
+                    else if max_visible { "maximum_still_visible" }
+                    else if solved.is_some() { "solved" } else { "no_valid_bracket" };
+                serde_json::json!({"line":line_id,"note":note_id,"time":note.time,"kind":format!("{:?}", note.kind),"fake":note.fake,"target_chart_time":target,"flow":solved.unwrap_or(res.note_flow_speed),"reason":reason,"minimum_visible":min_visible,"maximum_visible":max_visible,"minimum_has_geometry":minimum.is_some(),"maximum_has_geometry":maximum.is_some()})
+            })
+        }).collect()
+    }
+
     pub(crate) fn clear_fixed_preview(&mut self) {
         for line in &mut self.lines {
             line.cache.set_fixed_preview_flows(Vec::new());
