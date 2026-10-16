@@ -673,7 +673,7 @@ thread_local! {
 #[derive(Clone, Copy, Default)]
 struct HoldRepeatButton {
     id: Option<u64>,
-    started_at: f32,
+    started_at: f64,
     repeat: crate::practice_view::HoldRepeat,
     repeated: bool,
 }
@@ -1276,6 +1276,9 @@ impl<'a> Ui<'a> {
         let text = text.into();
         let len = length.unwrap_or(0.46);
         let cy = 0.115;
+        // Use real monotonic elapsed time rather than chart/pause time so the
+        // Fixed Preview repeat continues while playback is paused and is not FPS-bound.
+        let now_real = crate::practice_view::uses_hold_repeat(input_id).then(get_time);
         STATE.with(|state| {
             let mut state = state.borrow_mut();
             let entry = state.entry(format!("{input_id}:drag")).or_default();
@@ -1344,51 +1347,55 @@ impl<'a> Ui<'a> {
                     .no_baseline()
                     .draw();
                 let button_id = format!("{input_id}:{suffix}");
-                let button_rect = self.rect_to_global(r);
-                let mut clicked = false;
-                HOLD_REPEAT_STATE.with(|states| {
-                    let mut states = states.borrow_mut();
-                    let button = states.entry(button_id.clone()).or_default();
-                    self.ensure_touches().retain(|touch| {
-                        let owned = button.id == Some(touch.id);
-                        match touch.phase {
-                            TouchPhase::Started if button.id.is_none() && button_rect.contains(touch.position) => {
-                                button.id = Some(touch.id);
-                                button.started_at = t;
-                                button.repeat = crate::practice_view::HoldRepeat::default();
-                                button.repeated = false;
-                                false
-                            }
-                            TouchPhase::Moved | TouchPhase::Stationary if owned => {
-                                if !button_rect.contains(touch.position) {
+                if let Some(now_real) = now_real {
+                    let button_rect = self.rect_to_global(r);
+                    let mut clicked = false;
+                    HOLD_REPEAT_STATE.with(|states| {
+                        let mut states = states.borrow_mut();
+                        let button = states.entry(button_id.clone()).or_default();
+                        self.ensure_touches().retain(|touch| {
+                            let owned = button.id == Some(touch.id);
+                            match touch.phase {
+                                TouchPhase::Started if button.id.is_none() && button_rect.contains(touch.position) => {
+                                    button.id = Some(touch.id);
+                                    button.started_at = now_real;
+                                    button.repeat = crate::practice_view::HoldRepeat::default();
+                                    button.repeated = false;
+                                    false
+                                }
+                                TouchPhase::Moved | TouchPhase::Stationary if owned => {
+                                    if !button_rect.contains(touch.position) {
+                                        *button = HoldRepeatButton::default();
+                                    }
+                                    false
+                                }
+                                TouchPhase::Ended if owned => {
+                                    if crate::practice_view::release_steps(button.repeated) > 0 && button_rect.contains(touch.position) {
+                                        clicked = true;
+                                    }
                                     *button = HoldRepeatButton::default();
+                                    false
                                 }
-                                false
-                            }
-                            TouchPhase::Ended if owned => {
-                                if crate::practice_view::release_steps(button.repeated) > 0 && button_rect.contains(touch.position) {
-                                    clicked = true;
+                                TouchPhase::Cancelled if owned => {
+                                    *button = HoldRepeatButton::default();
+                                    false
                                 }
-                                *button = HoldRepeatButton::default();
-                                false
+                                _ => !button_rect.contains(touch.position),
                             }
-                            TouchPhase::Cancelled if owned => {
-                                *button = HoldRepeatButton::default();
-                                false
+                        });
+                        if button.id.is_some() {
+                            let count = button.repeat.advance(now_real - button.started_at);
+                            if count > 0 {
+                                button.repeated = true;
+                                *value = crate::practice_view::adjust_repeated_value(*value, delta, count, spec.min, spec.max);
                             }
-                            _ => !button_rect.contains(touch.position),
                         }
                     });
-                    if let Some(_) = button.id {
-                        let count = button.repeat.advance(t - button.started_at);
-                        if count > 0 {
-                            button.repeated = true;
-                            *value = crate::practice_view::adjust_repeated_value(*value, delta, count, spec.min, spec.max);
-                        }
+                    if clicked {
+                        *value = crate::practice_view::adjust_repeated_value(*value, delta, crate::practice_view::release_steps(false), spec.min, spec.max);
                     }
-                });
-                if clicked {
-                    *value = crate::practice_view::adjust_repeated_value(*value, delta, crate::practice_view::release_steps(false), spec.min, spec.max);
+                } else if self.clicked(r, state.entry(button_id).or_default()) {
+                    *value = (*value + delta).clamp(spec.min, spec.max);
                 }
                 x += button_size + gap;
             }
@@ -1416,7 +1423,7 @@ impl<'a> Ui<'a> {
         });
         HOLD_REPEAT_STATE.with(|state| {
             let mut state = state.borrow_mut();
-            for id in ["exercise_speed", "exercise_note_flow", "exercise_extra", "exercise_view_scale", "exercise_view_x", "exercise_view_y", "fixed_preview_time"] {
+            for id in ["fixed_preview_time"] {
                 state.remove(&format!("{id}:-"));
                 state.remove(&format!("{id}:+"));
             }

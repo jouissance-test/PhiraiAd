@@ -108,7 +108,7 @@ pub struct SliderSpec {
 /// smoothly, from about seven to twenty-two steps per second.
 #[derive(Clone, Copy, Debug)]
 pub struct HoldRepeat {
-    next_repeat_at: f32,
+    next_repeat_at: f64,
 }
 
 impl Default for HoldRepeat {
@@ -118,7 +118,7 @@ impl Default for HoldRepeat {
 }
 
 impl HoldRepeat {
-    pub fn advance(&mut self, held_seconds: f32) -> u32 {
+    pub fn advance(&mut self, held_seconds: f64) -> u32 {
         if !held_seconds.is_finite() || held_seconds < 0. {
             return 0;
         }
@@ -135,6 +135,10 @@ impl HoldRepeat {
 
 pub fn release_steps(repeated: bool) -> u32 {
     if repeated { 0 } else { 1 }
+}
+
+pub fn uses_hold_repeat(input_id: &str) -> bool {
+    input_id == "fixed_preview_time"
 }
 
 pub fn adjust_repeated_value(value: f32, delta: f32, count: u32, min: f32, max: f32) -> f32 {
@@ -229,6 +233,8 @@ mod tests {
         assert_eq!(after_release.advance(0.10), 0);
         assert_eq!(release_steps(false), 1);
         assert_eq!(release_steps(true), 0);
+        assert!(uses_hold_repeat("fixed_preview_time"));
+        assert!(!uses_hold_repeat("exercise_speed"));
     }
 
     #[test]
