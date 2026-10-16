@@ -201,30 +201,30 @@ impl Note {
     }
 
     pub fn now_transform_with_flow(&self, res: &Resource, ctrl_obj: &CtrlObject, base: f32, incline_sin: f32, flow: f32) -> Matrix {
-        let base = base * flow;
-        let incline_val = 1. - incline_sin * (base * res.aspect_ratio + self.object.translation.1.now()) * RPE_HEIGHT / 2. / 360.;
-        let mut tr = self.object.now_translation(res);
-        tr.x *= if matches!(self.kind, NoteKind::Hold { .. }) {
-            1.
-        } else {
-            incline_val * ctrl_obj.pos.now_opt().unwrap_or(1.)
-        };
-        tr.y += base;
-        let mut scale = self.object.scale.now_with_def(1.0, 1.0);
-        scale.x *= ctrl_obj.size.now_opt().unwrap_or(1.0);
-        if res.info.note_uniform_scale {
-            scale.y *= ctrl_obj.size.now_opt().unwrap_or(1.0);
-        } else {
-            scale.y = 1.0;
-        };
-        self.object.now_rotation().append_nonuniform_scaling(&scale).append_translation(&tr)
+        crate::note_visual::NoteTransform {
+            translation: self.object.now_translation(res),
+            scale: self.object.scale.now_with_def(1., 1.),
+            rotation: self.object.rotation.now(),
+            y_offset: self.object.translation.1.now(),
+            ctrl_size: ctrl_obj.size.now_opt().unwrap_or(1.),
+            ctrl_pos: ctrl_obj.pos.now_opt().unwrap_or(1.),
+            uniform_scale: res.info.note_uniform_scale,
+            hold: matches!(self.kind, NoteKind::Hold { .. }),
+            incline_sin,
+            aspect_ratio: res.aspect_ratio,
+        }
+        .matrix(base, flow)
     }
 
     /// Submit a render-only kind; judgement, reports and the chart keep self.kind.
     /// The drawing implementation below is the r14 renderer with a kind input.
-    pub fn render(&self, res: &mut Resource, config: &mut RenderConfig, bpm_list: &mut BpmList, flow: f32) {
+    pub fn render(&self, res: &mut Resource, config: &mut RenderConfig, bpm_list: &mut BpmList, plan: crate::fixed_preview_policy::PreviewPlan) {
         #[cfg(feature = "render-audit")]
         crate::render_audit::set_note(self as *const Self as usize);
+        if plan.hides(self.fake, res.time) {
+            return;
+        }
+        let flow = plan.flow();
         let kind = if res.config.shorten_holds && !self.fake {
             if let NoteKind::Hold { end_time, .. } = self.kind {
                 let end_time = self.visual_end_time(res, end_time);
@@ -234,8 +234,7 @@ impl Note {
                     config.height_curve.value_at(end_time).unwrap_or(self.height as f32) as f64
                 };
                 self.init_ctrl_obj(config.ctrl_obj, config.line_height);
-                let drawing_scale =
-                    self.speed * config.ctrl_obj.y.now_opt().unwrap_or(1.) as f64 / res.aspect_ratio as f64 * flow as f64;
+                let drawing_scale = self.speed * config.ctrl_obj.y.now_opt().unwrap_or(1.) as f64 / res.aspect_ratio as f64 * flow as f64;
                 let end_height = crate::chart_play::hold_render_end_height(self.height, sampled_height, drawing_scale);
                 NoteKind::Hold { end_time, end_height }
             } else {
@@ -296,9 +295,6 @@ impl Note {
         if matches!(self.judge, JudgeStatus::Judged) && !matches!(kind, NoteKind::Hold { .. }) {
             return;
         }
-        if crate::fixed_preview_policy::hide_before_target(self.fake, res.time, self.time, res.fixed_preview_chart_time) {
-            return;
-        }
         if config.appear_before.is_finite() {
             // TODO optimize
             let beat = bpm_list.beat(self.time);
@@ -339,7 +335,7 @@ impl Note {
 
         if !config.draw_below
             && (((res.time - FADEOUT_TIME >= self.time || self.fake && res.time >= self.time) && !matches!(kind, NoteKind::Hold { .. }))
-                || (self.time > res.time && cover_base <= -0.001))
+                || crate::note_visual::covered_before_hit(config.draw_below, res.time, self.time, cover_base))
         {
             return;
         }

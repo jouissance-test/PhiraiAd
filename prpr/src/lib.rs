@@ -14,6 +14,7 @@ pub mod info;
 pub mod judge;
 pub mod judgement_range;
 pub mod noise_area;
+mod note_visual;
 pub mod parse;
 pub mod particle;
 mod phigros_judge;

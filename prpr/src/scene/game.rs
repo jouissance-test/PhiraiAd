@@ -879,7 +879,7 @@ impl GameScene {
         }
         self.res.fixed_preview_chart_time = Some(preview_chart_seconds);
         let stats = self.chart.rebuild_fixed_preview(&self.res, preview_chart_seconds);
-        tracing::info!(solved = stats.solved, fallback = stats.fallback, preview_real_seconds = key.seconds, playback_rate = key.playback_rate, "fixed preview cache rebuilt");
+        tracing::info!(solved = stats.solved, gate_only = stats.gate_only, fallback = stats.fallback, preview_real_seconds = key.seconds, playback_rate = key.playback_rate, "fixed preview cache rebuilt");
     }
 
     fn report_mode(&self) -> Option<ReportGameMode> {

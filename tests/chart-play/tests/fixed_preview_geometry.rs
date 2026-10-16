@@ -7,7 +7,13 @@
 #![allow(dead_code)]
 
 use nalgebra::Rotation2;
+use phira_chart_play_tests::{
+    config::{NOTE_FLOW_SPEED_MAX, NOTE_FLOW_SPEED_MIN},
+    fixed_preview_policy::{FallbackReason, PreviewPlan},
+};
 use std::cell::RefCell;
+#[path = "../../../prpr/src/note_visual.rs"]
+mod note_visual;
 
 mod core {
     use super::*;
@@ -55,9 +61,15 @@ mod core {
         pub incline: AnimFloat,
         pub ctrl_obj: RefCell<CtrlObject>,
         pub notes: Vec<Note>,
+        pub show_below: bool,
     }
     pub struct Chart {
         pub lines: Vec<Line>,
+        pub settings: ChartSettings,
+    }
+    pub struct ChartSettings {
+        pub hold_partial_cover: bool,
+        pub pe_alpha_extension: bool,
     }
     #[derive(Default)]
     pub struct Config {
@@ -92,6 +104,7 @@ mod core {
         pub last_vp: (i32, i32, i32, i32),
         pub aspect_ratio: f32,
         pub note_width: f32,
+        pub note_flow_speed: f32,
         pub info: Info,
         pub res_pack: ResourcePack,
     }
@@ -172,6 +185,7 @@ fn resource() -> Resource {
         last_vp: (0, 0, 1920, 1080),
         aspect_ratio: 16. / 9.,
         note_width: 0.06,
+        note_flow_speed: 1.,
         info: core::Info { note_uniform_scale: false },
         res_pack: core::ResourcePack {
             note_style: style(),
@@ -183,7 +197,12 @@ fn resource() -> Resource {
 
 fn carrier_chart(line_alpha: f32) -> Chart {
     Chart {
+        settings: core::ChartSettings {
+            hold_partial_cover: false,
+            pe_alpha_extension: true,
+        },
         lines: vec![core::Line {
+            show_below: true,
             object: Object {
                 alpha: core::AnimFloat::fixed(line_alpha),
                 ..Default::default()
@@ -208,7 +227,152 @@ fn carrier_chart(line_alpha: f32) -> Chart {
 }
 
 fn solved(chart: &Chart, res: &Resource, time: f64) -> Option<f32> {
-    solve_flow(|flow| note_quad_at(chart, 0, 0, res, time, flow).is_some_and(quad_visible), 0.1, 20.)
+    solve_flow(|flow| note_quad_at(chart, 0, 0, res, time, flow).is_some_and(geometry_visible), 0.1, 20.)
+}
+
+#[test]
+fn reversing_scroll_must_not_accept_a_single_target_boundary_contact() {
+    // Minimal version of the Waking Shadows 62.246s failure: the integrated
+    // height moves away from the hit line after the target, then reverses.
+    // A boundary-only flow near 6.9 disappears; authored flow 1 stays visible.
+    use phira_chart_play_tests::anim::Keyframe;
+    let res = resource();
+    let mut chart = carrier_chart(1.);
+    chart.lines[0].notes[0].height = 0.;
+    chart.lines[0].height = core::AnimFloat::new(vec![Keyframe::new(9.55, -0.145, 0), Keyframe::new(9.65, -0.5, 0), Keyframe::new(10., 0., 0)]);
+    let old_boundary_flow = solved(&chart, &res, 9.55).unwrap();
+    assert!(old_boundary_flow > 6.);
+    assert!(!note_quad_at(&chart, 0, 0, &res, 9.65, old_boundary_flow).is_some_and(geometry_visible));
+    let plan = note_plan(&chart, 0, 0, &res, 0.45);
+    assert!(matches!(plan, PreviewPlan::GateOnly { original_flow: 1., .. }));
+    let accepted_flow = plan.flow();
+    for i in 0..=108 {
+        let time = 9.55 + 0.45 * i as f64 / 108.;
+        assert!(
+            note_quad_at(&chart, 0, 0, &res, time, accepted_flow).is_some_and(geometry_visible),
+            "accepted flow {accepted_flow} leaves the view at {time}"
+        );
+    }
+}
+
+#[test]
+fn interval_failure_restores_original_flow_and_has_no_time_gate() {
+    // Both flows leave the viewport during the interval. The target still has
+    // a valid bisection bracket, so rejecting only failed brackets is unsafe.
+    let plan = choose_plan(false, 1., 9.55, 10., 1., |time, flow| {
+        let distance = if time > 9.56 && time < 9.9 { 20. } else { 0.145 };
+        distance * flow <= 1.
+    });
+    assert_eq!(
+        plan,
+        PreviewPlan::Original {
+            original_flow: 1.,
+            reason: FallbackReason::VisibilityGap
+        }
+    );
+    assert!(!plan.hides(false, 0.));
+    assert_eq!(plan.flow(), 1.);
+}
+
+#[test]
+fn monotone_approach_can_use_constant_flow_when_original_is_outside_at_target() {
+    let plan = choose_plan(false, 1., 9., 10., 1., |time, flow| (10. - time) * 2. * flow as f64 <= 1.);
+    assert!(matches!(plan, PreviewPlan::Constant { flow, start: 9. } if (flow - 0.5).abs() < 0.001));
+    assert!(plan.hides(false, 8.99));
+    assert!(!plan.hides(false, 9.));
+}
+
+#[test]
+fn validation_rejects_late_gap_and_caps_work_independent_of_duration() {
+    let mut calls = 0;
+    let plan = choose_plan(false, 1., 0., 100., 1., |_, _| {
+        calls += 1;
+        true
+    });
+    assert_eq!(plan.reason(), "validation_budget_exceeded");
+    assert_eq!(calls, 0);
+    for gap in [9.5501..9.57, 9.7..9.73, 9.99..10.] {
+        let plan = choose_plan(false, 1., 9.55, 10., 1., |time, flow| !gap.contains(&time) && flow <= 3.);
+        assert!(
+            matches!(
+                plan,
+                PreviewPlan::Original {
+                    reason: FallbackReason::VisibilityGap,
+                    ..
+                }
+            ),
+            "{gap:?}: {plan:?}"
+        );
+    }
+}
+
+#[test]
+fn carrier_scale_zero_two_and_nonuniform_never_scale_attached_notes() {
+    let res = resource();
+    let mut chart = carrier_chart(1.);
+    let expected = note_quad_at(&chart, 0, 0, &res, 9.2, 0.2);
+    let expected_flow = solved(&chart, &res, 9.2);
+    for (x, y) in [(0., 0.), (2., 2.), (0.1, 5.), (-3., 0.)] {
+        chart.lines[0].object.scale.0 = core::AnimFloat::fixed(x);
+        chart.lines[0].object.scale.1 = core::AnimFloat::fixed(y);
+        assert_eq!(note_quad_at(&chart, 0, 0, &res, 9.2, 0.2), expected);
+        assert_eq!(solved(&chart, &res, 9.2), expected_flow);
+    }
+}
+
+#[test]
+fn hold_head_body_and_tail_share_the_accepted_reversing_plan() {
+    use phira_chart_play_tests::anim::Keyframe;
+    let res = resource();
+    let mut chart = carrier_chart(1.);
+    chart.lines[0].notes[0].height = 0.;
+    chart.lines[0].notes[0].kind = NoteKind::Hold {
+        end_time: 10.1,
+        end_height: 0.2,
+    };
+    chart.lines[0].height = core::AnimFloat::new(vec![Keyframe::new(9.55, -0.145, 0), Keyframe::new(9.65, -0.5, 0), Keyframe::new(10., 0., 0)]);
+    let plan = note_plan(&chart, 0, 0, &res, 0.45);
+    assert!(matches!(plan, PreviewPlan::GateOnly { original_flow: 1., .. }));
+    let quads = note_quad_at(&chart, 0, 0, &res, 9.65, plan.flow()).unwrap();
+    assert!(quads.into_iter().all(quad_visible));
+    assert!(plan.hides(false, 9.54));
+    assert!(!plan.hides(false, 9.55));
+}
+
+#[test]
+fn reversed_hold_body_cannot_fake_visibility_between_offscreen_head_and_tail() {
+    let res = resource();
+    let mut chart = carrier_chart(1.);
+    chart.lines[0].notes[0].height = 2.;
+    chart.lines[0].notes[0].kind = NoteKind::Hold {
+        end_time: 11.,
+        end_height: -2.,
+    };
+    let quads = note_quad_at(&chart, 0, 0, &res, 9.55, 1.).unwrap();
+    assert!(!geometry_visible(quads));
+}
+
+#[test]
+fn fake_and_invalid_targets_do_not_run_a_solver_or_install_a_gate() {
+    for (fake, start, reason) in [(true, 9., FallbackReason::FakeNote), (false, -0.1, FallbackReason::InvalidTarget)] {
+        let plan = choose_plan(fake, 0.7, start, 10., 1., |_, _| panic!("unsupported note sampled"));
+        assert_eq!(plan, PreviewPlan::original(0.7, reason));
+        assert!(!plan.hides(fake, -100.));
+    }
+}
+
+#[test]
+fn authored_cover_and_negative_alpha_visibility_are_not_solved_as_visible() {
+    let res = resource();
+    let mut chart = carrier_chart(1.);
+    chart.lines[0].notes[0].height = -0.1;
+    chart.lines[0].show_below = false;
+    assert!(note_quad_at(&chart, 0, 0, &res, 9.55, 1.).is_none());
+    chart.lines[0].show_below = true;
+    chart.lines[0].object.alpha = core::AnimFloat::fixed(-1.);
+    assert!(note_quad_at(&chart, 0, 0, &res, 9.55, 1.).is_none());
+    chart.lines[0].object.alpha = core::AnimFloat::fixed(-100.);
+    assert!(matches!(note_plan(&chart, 0, 0, &res, 0.45), PreviewPlan::Original { .. }));
 }
 
 #[test]

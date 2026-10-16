@@ -3,6 +3,7 @@
 use crate::{
     config::{NOTE_FLOW_SPEED_MAX, NOTE_FLOW_SPEED_MIN},
     core::{Chart, Matrix, Note, NoteKind, Object, Point, Resource, Vector},
+    fixed_preview_policy::{FallbackReason, PreviewPlan},
     parse::RPE_HEIGHT,
 };
 use anyhow::Result;
@@ -71,6 +72,13 @@ pub(crate) fn quad_visible(quad: [Point; 4]) -> bool {
     if quad.iter().any(|point| !point.x.is_finite() || !point.y.is_finite()) {
         return false;
     }
+    let area = (0..4)
+        .map(|i| quad[i].x * quad[(i + 1) % 4].y - quad[(i + 1) % 4].x * quad[i].y)
+        .sum::<f32>()
+        .abs();
+    if area <= 1e-10 {
+        return false;
+    }
     if quad.iter().copied().any(inside_view) {
         return true;
     }
@@ -101,9 +109,65 @@ pub(crate) fn solve_flow(mut visible: impl FnMut(f32) -> bool, min: f32, max: f3
     low.is_finite().then_some(low)
 }
 
+// At most 1/240 real second between samples, with a hard per-candidate budget.
+// This is a conservative sampled check, not a proof for arbitrary animation
+// between samples. Two candidates cost at most 3074 geometry evaluations plus
+// the 18-call target bracket search; unsupported durations fall back unchanged.
+const VALIDATION_HZ: f64 = 240.;
+const MAX_VALIDATION_STEPS: usize = 1536;
+
+fn validation_steps(start: f64, hit: f64, playback_rate: f64) -> Option<usize> {
+    let steps = ((hit - start) / playback_rate * VALIDATION_HZ).ceil();
+    if !steps.is_finite() || steps < 1. || steps > MAX_VALIDATION_STEPS as f64 {
+        None
+    } else {
+        Some(steps as usize)
+    }
+}
+
+fn visible_interval(start: f64, hit: f64, steps: usize, mut visible: impl FnMut(f64) -> bool) -> bool {
+    (0..=steps).all(|i| {
+        // Judgement may remove the head on the hit frame. Validate its left
+        // limit instead, including the entire readable approach interval.
+        let time = if i == steps {
+            hit - (hit - start).min(1e-7)
+        } else {
+            start + (hit - start) * i as f64 / steps as f64
+        };
+        visible(time)
+    })
+}
+
+fn choose_plan(fake: bool, original_flow: f32, start: f64, hit: f64, playback_rate: f64, mut visible: impl FnMut(f64, f32) -> bool) -> PreviewPlan {
+    let original = |reason| PreviewPlan::original(original_flow, reason);
+    if fake {
+        return original(FallbackReason::FakeNote);
+    }
+    if !start.is_finite() || start < 0. || !hit.is_finite() || hit <= start || !playback_rate.is_finite() || playback_rate <= 0. {
+        return original(FallbackReason::InvalidTarget);
+    }
+    let Some(steps) = validation_steps(start, hit, playback_rate) else {
+        return original(FallbackReason::ValidationBudget);
+    };
+    // Preserve authored motion whenever gating alone already supplies a full
+    // readable interval. Do not accelerate a reversing trajectory needlessly.
+    if visible_interval(start, hit, steps, |time| visible(time, original_flow)) {
+        return PreviewPlan::GateOnly { original_flow, start };
+    }
+    let Some(flow) = solve_flow(|flow| visible(start, flow), NOTE_FLOW_SPEED_MIN, NOTE_FLOW_SPEED_MAX) else {
+        return original(FallbackReason::NoBracket);
+    };
+    if visible_interval(start, hit, steps, |time| visible(time, flow)) {
+        PreviewPlan::Constant { flow, start }
+    } else {
+        original(FallbackReason::VisibilityGap)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct RebuildStats {
     pub solved: usize,
+    pub gate_only: usize,
     pub fallback: usize,
 }
 
@@ -142,9 +206,7 @@ fn line_position_at(chart: &Chart, id: usize, time: f64, aspect_ratio: f32) -> V
 }
 
 fn line_transform_at(chart: &Chart, id: usize, time: f64, aspect_ratio: f32) -> Matrix {
-    Rotation2::new(line_rotation_at(chart, id, time).to_radians())
-        .to_homogeneous()
-        .append_translation(&line_position_at(chart, id, time, aspect_ratio))
+    crate::note_visual::line_transform(line_rotation_at(chart, id, time), line_position_at(chart, id, time, aspect_ratio))
 }
 
 fn texture_for(note: &Note, res: &Resource) -> Texture2D {
@@ -175,7 +237,7 @@ fn preview_ndc(res: &Resource, point: Point) -> Point {
     Point::new((point.x - cx) * scale, (point.y + cy) * scale * res.aspect_ratio)
 }
 
-fn note_quad_at(chart: &Chart, line_id: usize, note_id: usize, res: &Resource, time: f64, flow: f32) -> Option<[Point; 4]> {
+fn note_quad_at(chart: &Chart, line_id: usize, note_id: usize, res: &Resource, time: f64, flow: f32) -> Option<[[Point; 4]; 3]> {
     let line = &chart.lines[line_id];
     let note = &line.notes[note_id];
     if !time.is_finite() || !flow.is_finite() || flow <= 0. || res.aspect_ratio.abs() <= f32::EPSILON {
@@ -204,14 +266,8 @@ fn note_quad_at(chart: &Chart, line_id: usize, note_id: usize, res: &Resource, t
 
     let speed = note.speed * ctrl_y as f64;
     let base = ((note.height - line_height) / res.aspect_ratio as f64 * speed) as f32;
-    let mut translation = object_translation_at(&note.object, time, res.aspect_ratio);
-    let mut note_scale = object_scale_at(&note.object, time);
-    note_scale.x *= ctrl_size;
-    if res.info.note_uniform_scale {
-        note_scale.y *= ctrl_size;
-    } else {
-        note_scale.y = 1.;
-    }
+    let translation = object_translation_at(&note.object, time, res.aspect_ratio);
+    let note_scale = object_scale_at(&note.object, time);
     if translation.iter().chain(note_scale.iter()).any(|value| !value.is_finite()) {
         return None;
     }
@@ -222,7 +278,19 @@ fn note_quad_at(chart: &Chart, line_id: usize, note_id: usize, res: &Resource, t
         1.
     };
     let half_width = res.note_width * multiple_scale;
-    let (note_transform, local) = match note.kind {
+    let geometry = crate::note_visual::NoteTransform {
+        translation,
+        scale: note_scale,
+        rotation: sample(&note.object.rotation, time, 0.),
+        y_offset,
+        ctrl_size,
+        ctrl_pos,
+        uniform_scale: res.info.note_uniform_scale,
+        hold: matches!(note.kind, NoteKind::Hold { .. }),
+        incline_sin: sample(&line.incline, time, 0.).to_radians().sin(),
+        aspect_ratio: res.aspect_ratio,
+    };
+    let (note_transform, local, cover_base) = match note.kind {
         NoteKind::Hold { end_time, end_height } => {
             let end_height = if res.config.shorten_holds && !note.fake {
                 let visual_end =
@@ -248,44 +316,73 @@ fn note_quad_at(chart: &Chart, line_id: usize, note_id: usize, res: &Resource, t
             let tail_half = style.hold_tail_rect().h / style.hold_tail_rect().w * half_width * ratio;
             let head_y = head - if res.res_pack.info.hold_compact { head_half } else { head_half * 2. };
             let tail_y = tail - if res.res_pack.info.hold_compact { tail_half } else { 0. };
-            let low = head.min(tail).min(head_y).min(tail_y);
-            let high = head.max(tail).max(head_y + head_half * 2.).max(tail_y + tail_half * 2.);
-            let transform = Rotation2::new(sample(&note.object.rotation, time, 0.).to_radians())
-                .to_homogeneous()
-                .append_nonuniform_scaling(&note_scale)
-                .append_translation(&translation);
-            (transform, local_rect(-half_width, low, half_width, high))
+            let cover_base = if chart.settings.hold_partial_cover {
+                (end_height - line_height) / res.aspect_ratio as f64 * speed
+            } else {
+                base as f64
+            };
+            // Test each actual rendered piece, not the bounding envelope: a
+            // reversed body is skipped by draw_tex, and the empty gap between
+            // an off-screen head and tail must not count as a visible Hold.
+            let body_top = tail.max(head);
+            (
+                geometry.matrix(0., flow),
+                [
+                    local_rect(-half_width, head_y, half_width, head_y + head_half * 2.),
+                    local_rect(-half_width, head, half_width, body_top),
+                    local_rect(-half_width, tail_y, half_width, tail_y + tail_half * 2.),
+                ],
+                cover_base,
+            )
         }
         _ => {
-            let scaled_base = base * flow;
-            let incline_sin = sample(&line.incline, time, 0.).to_radians().sin();
-            let incline = 1. - incline_sin * (scaled_base * res.aspect_ratio + y_offset) * RPE_HEIGHT / 2. / 360.;
-            translation.x *= incline * ctrl_pos;
-            translation.y += scaled_base;
             let texture = texture_for(note, res);
             let half_height = texture.height() / texture.width() * half_width;
-            let transform = Rotation2::new(sample(&note.object.rotation, time, 0.).to_radians())
-                .to_homogeneous()
-                .append_nonuniform_scaling(&note_scale)
-                .append_translation(&translation);
-            (transform, local_rect(-half_width, -half_height, half_width, half_height))
+            (geometry.matrix(base, flow), [local_rect(-half_width, -half_height, half_width, half_height); 3], base as f64)
         }
     };
-
-    let line_scale = object_scale_at(&line.object, time);
-    if line_scale.iter().any(|value| !value.is_finite()) {
+    let line_alpha = sample(&line.object.alpha, time, 1.);
+    let mut draw_below = line.show_below;
+    if line_alpha < 0. {
+        if !chart.settings.pe_alpha_extension {
+            return None;
+        }
+        match (-line_alpha).floor() as u32 {
+            1 => return None,
+            2 => draw_below = false,
+            // Beat-based appearance and unsupported negative-alpha modes are
+            // deliberately unplanned until their temporal gates are shared.
+            100..=1999 => return None,
+            _ => {}
+        }
+    }
+    if crate::note_visual::covered_before_hit(draw_below, time, note.time, cover_base) {
         return None;
     }
     let (flip_x, flip_y) = crate::chart_play::reflection_axes(res.config.flip_x(), false);
-    let mut transform = Matrix::identity().append_nonuniform_scaling(&Vector::new(flip_x, -flip_y))
-        * line_transform_at(chart, line_id, time, res.aspect_ratio)
-        * Matrix::identity().append_nonuniform_scaling(&line_scale);
+    let mut transform =
+        Matrix::identity().append_nonuniform_scaling(&Vector::new(flip_x, -flip_y)) * line_transform_at(chart, line_id, time, res.aspect_ratio);
     if !note.above {
         transform *= Matrix::identity().append_nonuniform_scaling(&Vector::new(1., -1.));
     }
     transform *= note_transform;
-    let quad = local.map(|point| preview_ndc(res, transform.transform_point(&point)));
-    quad.iter().all(|point| point.x.is_finite() && point.y.is_finite()).then_some(quad)
+    let quads = local.map(|quad| quad.map(|point| preview_ndc(res, transform.transform_point(&point))));
+    quads
+        .iter()
+        .flatten()
+        .all(|point| point.x.is_finite() && point.y.is_finite())
+        .then_some(quads)
+}
+
+fn geometry_visible(quads: [[Point; 4]; 3]) -> bool {
+    quads.into_iter().any(quad_visible)
+}
+
+fn note_plan(chart: &Chart, line_id: usize, note_id: usize, res: &Resource, preview_chart_seconds: f64) -> PreviewPlan {
+    let note = &chart.lines[line_id].notes[note_id];
+    choose_plan(note.fake, res.note_flow_speed, note.time - preview_chart_seconds, note.time, res.config.speed as f64, |time, flow| {
+        note_quad_at(chart, line_id, note_id, res, time, flow).is_some_and(geometry_visible)
+    })
 }
 
 impl Chart {
@@ -298,31 +395,23 @@ impl Chart {
                 let target = note.time - preview_chart_seconds;
                 let minimum = note_quad_at(self, line_id, note_id, res, target, NOTE_FLOW_SPEED_MIN);
                 let maximum = note_quad_at(self, line_id, note_id, res, target, NOTE_FLOW_SPEED_MAX);
-                let min_visible = minimum.is_some_and(quad_visible);
-                let max_visible = maximum.is_some_and(quad_visible);
-                let solved = if !note.fake && target >= 0. && target.is_finite() {
-                    solve_flow(|flow| note_quad_at(self, line_id, note_id, res, target, flow).is_some_and(quad_visible), NOTE_FLOW_SPEED_MIN, NOTE_FLOW_SPEED_MAX)
-                } else { None };
-                let reason = if note.fake { "fake_note_not_applicable" }
-                    else if !target.is_finite() || target < 0. { "target_before_chart_or_nonfinite" }
-                    else if minimum.is_none() { "no_geometry_at_minimum" }
-                    else if !min_visible { "minimum_not_visible" }
-                    else if max_visible { "maximum_still_visible" }
-                    else if solved.is_some() { "solved" } else { "no_valid_bracket" };
-                serde_json::json!({"line":line_id,"note":note_id,"time":note.time,"kind":format!("{:?}", note.kind),"fake":note.fake,"target_chart_time":target,"flow":solved.unwrap_or(res.note_flow_speed),"reason":reason,"minimum_visible":min_visible,"maximum_visible":max_visible,"minimum_has_geometry":minimum.is_some(),"maximum_has_geometry":maximum.is_some()})
+                let min_visible = minimum.is_some_and(geometry_visible);
+                let max_visible = maximum.is_some_and(geometry_visible);
+                let plan = note_plan(self, line_id, note_id, res, preview_chart_seconds);
+                serde_json::json!({"line":line_id,"note":note_id,"time":note.time,"kind":format!("{:?}", note.kind),"fake":note.fake,"target_chart_time":target,"flow":plan.flow(),"plan":plan.name(),"reason":plan.reason(),"minimum_visible":min_visible,"maximum_visible":max_visible,"minimum_has_geometry":minimum.is_some(),"maximum_has_geometry":maximum.is_some(),"validation_hz":VALIDATION_HZ,"validation_max_steps":MAX_VALIDATION_STEPS})
             })
         }).collect()
     }
 
     pub(crate) fn clear_fixed_preview(&mut self) {
         for line in &mut self.lines {
-            line.cache.set_fixed_preview_flows(Vec::new());
+            line.cache.set_fixed_preview_plans(Vec::new());
         }
     }
 
     pub(crate) fn rebuild_fixed_preview(&mut self, res: &Resource, preview_chart_seconds: f64) -> RebuildStats {
         let mut stats = RebuildStats::default();
-        let flows: Vec<Vec<f32>> = self
+        let plans: Vec<Vec<PreviewPlan>> = self
             .lines
             .iter()
             .enumerate()
@@ -331,30 +420,20 @@ impl Chart {
                     .iter()
                     .enumerate()
                     .map(|(note_id, note)| {
-                        if !crate::fixed_preview_policy::applies_to_note(note.fake) {
-                            return res.note_flow_speed;
+                        let plan = note_plan(self, line_id, note_id, res, preview_chart_seconds);
+                        match plan {
+                            PreviewPlan::Constant { .. } => stats.solved += 1,
+                            PreviewPlan::GateOnly { .. } => stats.gate_only += 1,
+                            PreviewPlan::Original { .. } if !note.fake => stats.fallback += 1,
+                            _ => {}
                         }
-                        let target_time = note.time - preview_chart_seconds;
-                        let solved = (target_time >= 0. && target_time.is_finite()).then(|| {
-                            solve_flow(
-                                |flow| note_quad_at(self, line_id, note_id, res, target_time, flow).is_some_and(quad_visible),
-                                NOTE_FLOW_SPEED_MIN,
-                                NOTE_FLOW_SPEED_MAX,
-                            )
-                        });
-                        if let Some(flow) = solved.flatten() {
-                            stats.solved += 1;
-                            flow
-                        } else {
-                            stats.fallback += 1;
-                            res.note_flow_speed
-                        }
+                        plan
                     })
                     .collect()
             })
             .collect();
-        for (line, flows) in self.lines.iter_mut().zip(flows) {
-            line.cache.set_fixed_preview_flows(flows);
+        for (line, plans) in self.lines.iter_mut().zip(plans) {
+            line.cache.set_fixed_preview_plans(plans);
         }
         stats
     }

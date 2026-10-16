@@ -1,4 +1,5 @@
 use phira_chart_play_tests::chart_play;
+pub use phira_chart_play_tests::fixed_preview_policy;
 mod judge {
  #[derive(Clone,Debug,PartialEq)]pub enum HitSound{Tap,Drag,Flick,Custom}
  impl HitSound{pub fn default_from_kind(k:&crate::core::NoteKind)->Self{match k{crate::core::NoteKind::Click|crate::core::NoteKind::Hold{..}=>Self::Tap,crate::core::NoteKind::Drag=>Self::Drag,crate::core::NoteKind::Flick=>Self::Flick}}}
