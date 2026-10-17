@@ -111,14 +111,25 @@ pub(crate) fn solve_flow(mut visible: impl FnMut(f32) -> bool, min: f32, max: f3
 
 // At most 1/240 real second between samples, with a hard per-candidate budget.
 // This is a conservative sampled check, not a proof for arbitrary animation
-// between samples. Two candidates cost at most 3074 geometry evaluations plus
-// the 18-call target bracket search; unsupported durations fall back unchanged.
+// between samples. Unsupported durations fall back unchanged.
 const VALIDATION_HZ: f64 = 240.;
 const MAX_VALIDATION_STEPS: usize = 1536;
-// Equivalent displacement in one 240Hz real-time frame: 0.1 NDC is 5% of
-// the viewport width, or 24 NDC/real second. Only newly solved Constant motion
-// is constrained; GateOnly preserves the chart's authored trajectory.
-const CONSTANT_MOTION_STEP_LIMIT_NDC: f64 = 0.1;
+// If the target-boundary candidate fails, refine the largest safe constant
+// flow between the known-safe minimum and failed upper candidate. This remains
+// a single constant-flow plan, not a multi-segment dynamic-flow search.
+const CONSTANT_FLOW_REFINEMENT_STEPS: usize = 10;
+// A Constant plan may inherit fast authored line motion, but must not add a
+// materially faster semantic-head spike than the Original trajectory. The
+// absolute floor still rejects a newly introduced spike when Original barely
+// moves; 1 NDC/real-second absorbs sampling/float noise in the peak comparison.
+const CONSTANT_MOTION_ABSOLUTE_LIMIT_NDC_PER_REAL_SECOND: f64 = 24.;
+const CONSTANT_MOTION_ORIGINAL_TOLERANCE_NDC_PER_REAL_SECOND: f64 = 1.;
+
+#[derive(Clone, Copy)]
+struct PreviewSample {
+    anchor: Point,
+    visible: bool,
+}
 
 fn validation_steps(start: f64, hit: f64, playback_rate: f64) -> Option<usize> {
     let steps = ((hit - start) / playback_rate * VALIDATION_HZ).ceil();
@@ -142,13 +153,50 @@ fn visible_interval(start: f64, hit: f64, steps: usize, mut visible: impl FnMut(
     })
 }
 
+fn validate_constant_candidate(
+    start: f64,
+    hit: f64,
+    steps: usize,
+    playback_rate: f64,
+    flow: f32,
+    original_flow: f32,
+    sample: &mut impl FnMut(f64, f32) -> Option<PreviewSample>,
+) -> Result<(), FallbackReason> {
+    let mut previous: Option<(f64, Point, Point)> = None;
+    let mut failure = FallbackReason::VisibilityGap;
+    let accepted = visible_interval(start, hit, steps, |time| {
+        let Some(candidate_sample) = sample(time, flow) else { return false };
+        if !candidate_sample.visible {
+            return false;
+        }
+        let anchor = candidate_sample.anchor;
+        let Some(original_anchor) = sample(time, original_flow).map(|sample| sample.anchor) else {
+            return false;
+        };
+        if let Some((previous_time, previous_anchor, previous_original_anchor)) = previous {
+            let real_dt = (time - previous_time) / playback_rate;
+            let speed = (anchor - previous_anchor).norm() as f64 / real_dt;
+            let original_speed = (original_anchor - previous_original_anchor).norm() as f64 / real_dt;
+            let motion_speed_limit =
+                CONSTANT_MOTION_ABSOLUTE_LIMIT_NDC_PER_REAL_SECOND.max(original_speed + CONSTANT_MOTION_ORIGINAL_TOLERANCE_NDC_PER_REAL_SECOND);
+            if !speed.is_finite() || !original_speed.is_finite() || speed > motion_speed_limit {
+                failure = FallbackReason::MotionSpike;
+                return false;
+            }
+        }
+        previous = Some((time, anchor, original_anchor));
+        true
+    });
+    accepted.then_some(()).ok_or(failure)
+}
+
 fn choose_plan(
     fake: bool,
     original_flow: f32,
     start: f64,
     hit: f64,
     playback_rate: f64,
-    mut sample: impl FnMut(f64, f32) -> Option<Point>,
+    mut sample: impl FnMut(f64, f32) -> Option<PreviewSample>,
 ) -> PreviewPlan {
     let original = |reason| PreviewPlan::original(original_flow, reason);
     if fake {
@@ -162,36 +210,36 @@ fn choose_plan(
     };
     // Preserve authored motion whenever gating alone already supplies a full
     // readable interval. Do not accelerate a reversing trajectory needlessly.
-    if visible_interval(start, hit, steps, |time| sample(time, original_flow).is_some()) {
+    if visible_interval(start, hit, steps, |time| sample(time, original_flow).is_some_and(|sample| sample.visible)) {
         return PreviewPlan::GateOnly { original_flow, start };
     }
-    let Some(flow) = solve_flow(|flow| sample(start, flow).is_some(), NOTE_FLOW_SPEED_MIN, NOTE_FLOW_SPEED_MAX) else {
+    let Some(flow) = solve_flow(|flow| sample(start, flow).is_some_and(|sample| sample.visible), NOTE_FLOW_SPEED_MIN, NOTE_FLOW_SPEED_MAX) else {
         return original(FallbackReason::NoBracket);
     };
-    let mut previous: Option<(f64, Point)> = None;
-    let mut motion_spike = false;
-    let accepted = visible_interval(start, hit, steps, |time| {
-        let Some(anchor) = sample(time, flow) else { return false };
-        if let Some((previous_time, previous_anchor)) = previous {
-            let real_dt = (time - previous_time) / playback_rate;
-            let equivalent_step = (anchor - previous_anchor).norm() as f64 / real_dt / VALIDATION_HZ;
-            if !equivalent_step.is_finite() || equivalent_step > CONSTANT_MOTION_STEP_LIMIT_NDC {
-                motion_spike = true;
-                return false;
+    let boundary_failure = match validate_constant_candidate(start, hit, steps, playback_rate, flow, original_flow, &mut sample) {
+        Ok(()) => return PreviewPlan::Constant { flow, start },
+        Err(reason) => reason,
+    };
+    let minimum_failure = match validate_constant_candidate(start, hit, steps, playback_rate, NOTE_FLOW_SPEED_MIN, original_flow, &mut sample) {
+        Ok(()) => {
+            let (mut low, mut high) = (NOTE_FLOW_SPEED_MIN, flow);
+            for _ in 0..CONSTANT_FLOW_REFINEMENT_STEPS {
+                let middle = (low + high) * 0.5;
+                if validate_constant_candidate(start, hit, steps, playback_rate, middle, original_flow, &mut sample).is_ok() {
+                    low = middle;
+                } else {
+                    high = middle;
+                }
             }
+            return PreviewPlan::Constant { flow: low, start };
         }
-        previous = Some((time, anchor));
-        true
-    });
-    if accepted {
-        PreviewPlan::Constant { flow, start }
+        Err(reason) => reason,
+    };
+    original(if boundary_failure == FallbackReason::MotionSpike || minimum_failure == FallbackReason::MotionSpike {
+        FallbackReason::MotionSpike
     } else {
-        original(if motion_spike {
-            FallbackReason::MotionSpike
-        } else {
-            FallbackReason::VisibilityGap
-        })
-    }
+        FallbackReason::VisibilityGap
+    })
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -272,31 +320,53 @@ struct NoteGeometry {
     anchor: Point,
 }
 
-fn note_geometry_at(chart: &Chart, line_id: usize, note_id: usize, res: &Resource, time: f64, flow: f32) -> Option<NoteGeometry> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GeometryAbsence {
+    InvalidInput,
+    ZeroSpeed,
+    ControlNonFinite,
+    TransformNonFinite,
+    OutputNonFinite,
+}
+
+impl GeometryAbsence {
+    #[cfg(feature = "render-audit")]
+    fn name(self) -> &'static str {
+        match self {
+            Self::InvalidInput => "invalid_input",
+            Self::ZeroSpeed => "zero_speed",
+            Self::ControlNonFinite => "control_non_finite",
+            Self::TransformNonFinite => "transform_non_finite",
+            Self::OutputNonFinite => "output_non_finite",
+        }
+    }
+}
+
+fn note_geometry_at_diagnostic(
+    chart: &Chart,
+    line_id: usize,
+    note_id: usize,
+    res: &Resource,
+    time: f64,
+    flow: f32,
+) -> Result<NoteGeometry, GeometryAbsence> {
     let line = &chart.lines[line_id];
     let note = &line.notes[note_id];
     if !time.is_finite() || !flow.is_finite() || flow <= 0. || res.aspect_ratio.abs() <= f32::EPSILON {
-        return None;
+        return Err(GeometryAbsence::InvalidInput);
     }
-    // Carrier opacity does not affect note geometry: transparent lines can still
-    // carry visible notes. The renderer owns negative-alpha visibility extensions.
-    if sample(&note.object.alpha, time, 1.) <= 0. {
-        return None;
-    }
-
     let line_height = sample(&line.height, time, 0.) as f64;
     let y_offset = sample(&note.object.translation.1, time, 0.);
     if note.speed.abs() <= f64::EPSILON {
-        return None;
+        return Err(GeometryAbsence::ZeroSpeed);
     }
     let ctrl_height = (note.height - line_height + y_offset as f64 / note.speed) * RPE_HEIGHT as f64 / 2.;
     let ctrl = line.ctrl_obj.borrow();
     let ctrl_y = sample(&ctrl.y, ctrl_height, 1.);
     let ctrl_size = sample(&ctrl.size, ctrl_height, 1.);
     let ctrl_pos = sample(&ctrl.pos, ctrl_height, 1.);
-    let ctrl_alpha = sample(&ctrl.alpha, ctrl_height, 1.);
-    if [ctrl_y, ctrl_size, ctrl_pos, ctrl_alpha].iter().any(|value| !value.is_finite()) || ctrl_alpha <= 0. {
-        return None;
+    if [ctrl_y, ctrl_size, ctrl_pos].iter().any(|value| !value.is_finite()) {
+        return Err(GeometryAbsence::ControlNonFinite);
     }
 
     let speed = note.speed * ctrl_y as f64;
@@ -304,7 +374,7 @@ fn note_geometry_at(chart: &Chart, line_id: usize, note_id: usize, res: &Resourc
     let translation = object_translation_at(&note.object, time, res.aspect_ratio);
     let note_scale = object_scale_at(&note.object, time);
     if translation.iter().chain(note_scale.iter()).any(|value| !value.is_finite()) {
-        return None;
+        return Err(GeometryAbsence::TransformNonFinite);
     }
 
     let multiple_scale = if res.config.double_hint && note.multiple_hint {
@@ -325,7 +395,7 @@ fn note_geometry_at(chart: &Chart, line_id: usize, note_id: usize, res: &Resourc
         incline_sin: sample(&line.incline, time, 0.).to_radians().sin(),
         aspect_ratio: res.aspect_ratio,
     };
-    let (note_transform, local, cover_base, anchor_local) = match note.kind {
+    let (note_transform, local, anchor_local) = match note.kind {
         NoteKind::Hold { end_time, end_height } => {
             let end_height = if res.config.shorten_holds && !note.fake {
                 let visual_end =
@@ -351,11 +421,6 @@ fn note_geometry_at(chart: &Chart, line_id: usize, note_id: usize, res: &Resourc
             let tail_half = style.hold_tail_rect().h / style.hold_tail_rect().w * half_width * ratio;
             let head_y = head - if res.res_pack.info.hold_compact { head_half } else { head_half * 2. };
             let tail_y = tail - if res.res_pack.info.hold_compact { tail_half } else { 0. };
-            let cover_base = if chart.settings.hold_partial_cover {
-                (end_height - line_height) / res.aspect_ratio as f64 * speed
-            } else {
-                base as f64
-            };
             // Test each actual rendered piece, not the bounding envelope: a
             // reversed body is skipped by draw_tex, and the empty gap between
             // an off-screen head and tail must not count as a visible Hold.
@@ -367,34 +432,20 @@ fn note_geometry_at(chart: &Chart, line_id: usize, note_id: usize, res: &Resourc
                     local_rect(-half_width, head, half_width, body_top),
                     local_rect(-half_width, tail_y, half_width, tail_y + tail_half * 2.),
                 ],
-                cover_base,
                 Point::new(0., head),
             )
         }
         _ => {
             let texture = texture_for(note, res);
             let half_height = texture.height() / texture.width() * half_width;
-            (geometry.matrix(base, flow), [local_rect(-half_width, -half_height, half_width, half_height); 3], base as f64, Point::origin())
+            (geometry.matrix(base, flow), [local_rect(-half_width, -half_height, half_width, half_height); 3], Point::origin())
         }
     };
-    let line_alpha = sample(&line.object.alpha, time, 1.);
-    let mut draw_below = line.show_below;
-    if line_alpha < 0. {
-        if !chart.settings.pe_alpha_extension {
-            return None;
-        }
-        match (-line_alpha).floor() as u32 {
-            1 => return None,
-            2 => draw_below = false,
-            // Beat-based appearance and unsupported negative-alpha modes are
-            // deliberately unplanned until their temporal gates are shared.
-            100..=1999 => return None,
-            _ => {}
-        }
-    }
-    if crate::note_visual::covered_before_hit(draw_below, time, note.time, cover_base) {
-        return None;
-    }
+    // Alpha, negative-alpha appearance modes and cover are renderer-owned
+    // visibility gates, not geometry. They remain authored exactly as-is, but
+    // must not make an otherwise safe travel trajectory fall back to original
+    // speed. The solver only answers whether the transformed quads stay in the
+    // viewport after their target boundary contact.
     let (flip_x, flip_y) = crate::chart_play::reflection_axes(res.config.flip_x(), false);
     let mut transform =
         Matrix::identity().append_nonuniform_scaling(&Vector::new(flip_x, -flip_y)) * line_transform_at(chart, line_id, time, res.aspect_ratio);
@@ -406,12 +457,20 @@ fn note_geometry_at(chart: &Chart, line_id: usize, note_id: usize, res: &Resourc
     // texture offsets. It cannot jump when body length/topology/skin changes.
     let anchor = preview_ndc(res, transform.transform_point(&anchor_local));
     let quads = local.map(|quad| quad.map(|point| preview_ndc(res, transform.transform_point(&point))));
-    quads
+    if quads
         .iter()
         .flatten()
         .chain(std::iter::once(&anchor))
         .all(|point| point.x.is_finite() && point.y.is_finite())
-        .then_some(NoteGeometry { quads, anchor })
+    {
+        Ok(NoteGeometry { quads, anchor })
+    } else {
+        Err(GeometryAbsence::OutputNonFinite)
+    }
+}
+
+fn note_geometry_at(chart: &Chart, line_id: usize, note_id: usize, res: &Resource, time: f64, flow: f32) -> Option<NoteGeometry> {
+    note_geometry_at_diagnostic(chart, line_id, note_id, res, time, flow).ok()
 }
 
 fn note_quad_at(chart: &Chart, line_id: usize, note_id: usize, res: &Resource, time: f64, flow: f32) -> Option<[[Point; 4]; 3]> {
@@ -422,12 +481,154 @@ fn geometry_visible(quads: [[Point; 4]; 3]) -> bool {
     quads.into_iter().any(quad_visible)
 }
 
+#[cfg(feature = "render-audit")]
+fn audit_constant_candidate(
+    chart: &Chart,
+    line_id: usize,
+    note_id: usize,
+    res: &Resource,
+    start: f64,
+    hit: f64,
+    playback_rate: f64,
+    flow: f32,
+) -> serde_json::Value {
+    let Some(steps) = validation_steps(start, hit, playback_rate) else {
+        return serde_json::json!({"flow":flow,"validation_budget":false});
+    };
+    let mut geometry_missing = 0_usize;
+    let mut geometry_missing_reasons = std::collections::BTreeMap::<&'static str, usize>::new();
+    let mut outside_viewport = 0_usize;
+    let mut visible = 0_usize;
+    let mut motion_spike = 0_usize;
+    let mut previous: Option<(f64, Point)> = None;
+    let mut geometric_previous: Option<(f64, Point)> = None;
+    let mut visible_peak_speed = 0_f64;
+    let mut geometric_peak_speed = 0_f64;
+    for i in 0..=steps {
+        let time = if i == steps {
+            hit - (hit - start).min(1e-7)
+        } else {
+            start + (hit - start) * i as f64 / steps as f64
+        };
+        let geometry = match note_geometry_at_diagnostic(chart, line_id, note_id, res, time, flow) {
+            Ok(geometry) => geometry,
+            Err(reason) => {
+                geometry_missing += 1;
+                *geometry_missing_reasons.entry(reason.name()).or_default() += 1;
+                previous = None;
+                continue;
+            }
+        };
+        if let Some((previous_time, previous_anchor)) = geometric_previous {
+            let real_dt = (time - previous_time) / playback_rate;
+            let speed = (geometry.anchor - previous_anchor).norm() as f64 / real_dt;
+            if speed.is_finite() {
+                geometric_peak_speed = geometric_peak_speed.max(speed);
+            }
+        }
+        geometric_previous = Some((time, geometry.anchor));
+        if !geometry_visible(geometry.quads) {
+            outside_viewport += 1;
+            previous = None;
+            continue;
+        }
+        visible += 1;
+        if let Some((previous_time, previous_anchor)) = previous {
+            let real_dt = (time - previous_time) / playback_rate;
+            let speed = (geometry.anchor - previous_anchor).norm() as f64 / real_dt;
+            if speed.is_finite() {
+                visible_peak_speed = visible_peak_speed.max(speed);
+            }
+            if !speed.is_finite() || speed > CONSTANT_MOTION_ABSOLUTE_LIMIT_NDC_PER_REAL_SECOND {
+                motion_spike += 1;
+            }
+        }
+        previous = Some((time, geometry.anchor));
+    }
+    serde_json::json!({
+        "flow":flow,
+        "validation_budget":true,
+        "samples":steps+1,
+        "geometry_missing":geometry_missing,
+        "geometry_missing_reasons":geometry_missing_reasons,
+        "outside_viewport":outside_viewport,
+        "visible":visible,
+        "motion_spike":motion_spike,
+        "visible_peak_speed_ndc_per_real_second":visible_peak_speed,
+        "geometric_peak_speed_ndc_per_real_second":geometric_peak_speed,
+    })
+}
+
+#[cfg(feature = "render-audit")]
+fn authored_alpha_gate_at(chart: &Chart, line_id: usize, note_id: usize, time: f64) -> Option<&'static str> {
+    let line = &chart.lines[line_id];
+    let note = &line.notes[note_id];
+    let line_alpha = sample(&line.object.alpha, time, 1.);
+    if line_alpha < 0. {
+        if !chart.settings.pe_alpha_extension {
+            return Some("negative_line_alpha_disabled");
+        }
+        if (-line_alpha).floor() as u32 == 1 {
+            return Some("negative_line_alpha_hidden");
+        }
+    }
+    if sample(&note.object.alpha, time, 1.) <= 0. {
+        return Some("note_alpha");
+    }
+    if note.speed.abs() <= f64::EPSILON {
+        return None;
+    }
+    let line_height = sample(&line.height, time, 0.) as f64;
+    let y_offset = sample(&note.object.translation.1, time, 0.);
+    let ctrl_height = (note.height - line_height + y_offset as f64 / note.speed) * RPE_HEIGHT as f64 / 2.;
+    (sample(&line.ctrl_obj.borrow().alpha, ctrl_height, 1.) <= 0.).then_some("control_alpha")
+}
+
+#[cfg(feature = "render-audit")]
+fn audit_authored_visibility(chart: &Chart, line_id: usize, note_id: usize, start: f64, hit: f64, playback_rate: f64) -> serde_json::Value {
+    let Some(steps) = validation_steps(start, hit, playback_rate) else {
+        return serde_json::json!({"validation_budget":false});
+    };
+    let mut hidden_reasons = std::collections::BTreeMap::<&'static str, usize>::new();
+    let mut hidden_at_target = false;
+    let mut hidden_spans = Vec::<[f64; 2]>::new();
+    let mut hidden_span_start = None;
+    let mut previous_time = start;
+    for i in 0..=steps {
+        let time = if i == steps {
+            hit - (hit - start).min(1e-7)
+        } else {
+            start + (hit - start) * i as f64 / steps as f64
+        };
+        if let Some(reason) = authored_alpha_gate_at(chart, line_id, note_id, time) {
+            *hidden_reasons.entry(reason).or_default() += 1;
+            hidden_at_target |= i == 0;
+            hidden_span_start.get_or_insert(time);
+        } else if let Some(span_start) = hidden_span_start.take() {
+            hidden_spans.push([span_start, previous_time]);
+        }
+        previous_time = time;
+    }
+    if let Some(span_start) = hidden_span_start {
+        hidden_spans.push([span_start, previous_time]);
+    }
+    serde_json::json!({
+        "validation_budget":true,
+        "samples":steps+1,
+        "hidden_samples":hidden_reasons.values().sum::<usize>(),
+        "hidden_at_target":hidden_at_target,
+        "hidden_spans":hidden_spans,
+        "hidden_reasons":hidden_reasons,
+    })
+}
+
 fn note_plan(chart: &Chart, line_id: usize, note_id: usize, res: &Resource, preview_chart_seconds: f64) -> PreviewPlan {
     let note = &chart.lines[line_id].notes[note_id];
     choose_plan(note.fake, res.note_flow_speed, note.time - preview_chart_seconds, note.time, res.config.speed as f64, |time, flow| {
-        note_geometry_at(chart, line_id, note_id, res, time, flow)
-            .filter(|geometry| geometry_visible(geometry.quads))
-            .map(|geometry| geometry.anchor)
+        note_geometry_at(chart, line_id, note_id, res, time, flow).map(|geometry| PreviewSample {
+            anchor: geometry.anchor,
+            visible: geometry_visible(geometry.quads),
+        })
     })
 }
 
@@ -443,8 +644,66 @@ impl Chart {
                 let maximum = note_quad_at(self, line_id, note_id, res, target, NOTE_FLOW_SPEED_MAX);
                 let min_visible = minimum.is_some_and(geometry_visible);
                 let max_visible = maximum.is_some_and(geometry_visible);
+                let boundary_flow = solve_flow(
+                    |flow| note_quad_at(self, line_id, note_id, res, target, flow).is_some_and(geometry_visible),
+                    NOTE_FLOW_SPEED_MIN,
+                    NOTE_FLOW_SPEED_MAX,
+                );
                 let plan = note_plan(self, line_id, note_id, res, preview_chart_seconds);
-                serde_json::json!({"line":line_id,"note":note_id,"time":note.time,"kind":format!("{:?}", note.kind),"fake":note.fake,"target_chart_time":target,"flow":plan.flow(),"plan":plan.name(),"reason":plan.reason(),"minimum_visible":min_visible,"maximum_visible":max_visible,"minimum_has_geometry":minimum.is_some(),"maximum_has_geometry":maximum.is_some(),"validation_hz":VALIDATION_HZ,"validation_max_steps":MAX_VALIDATION_STEPS,"constant_motion_step_limit_ndc":CONSTANT_MOTION_STEP_LIMIT_NDC,"constant_motion_speed_limit_ndc_per_real_second":CONSTANT_MOTION_STEP_LIMIT_NDC*VALIDATION_HZ,"constant_motion_metric":"semantic_head_anchor_ndc_per_real_second"})
+                let minimum_candidate = audit_constant_candidate(
+                    self,
+                    line_id,
+                    note_id,
+                    res,
+                    target,
+                    note.time,
+                    res.config.speed as f64,
+                    NOTE_FLOW_SPEED_MIN,
+                );
+                let boundary_candidate = boundary_flow.map(|flow| audit_constant_candidate(
+                    self,
+                    line_id,
+                    note_id,
+                    res,
+                    target,
+                    note.time,
+                    res.config.speed as f64,
+                    flow,
+                ));
+                let original_candidate = audit_constant_candidate(
+                    self,
+                    line_id,
+                    note_id,
+                    res,
+                    target,
+                    note.time,
+                    res.config.speed as f64,
+                    res.note_flow_speed,
+                );
+                let authored_visibility = audit_authored_visibility(
+                    self,
+                    line_id,
+                    note_id,
+                    target,
+                    note.time,
+                    res.config.speed as f64,
+                );
+                let no_bracket_probe = boundary_flow.is_none().then(|| {
+                    let mut visible_count = 0_usize;
+                    let mut first_visible = None;
+                    let mut last_visible = None;
+                    for i in 0..=64 {
+                        let flow = NOTE_FLOW_SPEED_MIN
+                            + (NOTE_FLOW_SPEED_MAX - NOTE_FLOW_SPEED_MIN) * i as f32 / 64.;
+                        if note_quad_at(self, line_id, note_id, res, target, flow).is_some_and(geometry_visible) {
+                            visible_count += 1;
+                            first_visible.get_or_insert(flow);
+                            last_visible = Some(flow);
+                        }
+                    }
+                    serde_json::json!({"samples":65,"visible_count":visible_count,"first_visible":first_visible,"last_visible":last_visible})
+                });
+                serde_json::json!({"line":line_id,"note":note_id,"time":note.time,"kind":format!("{:?}", note.kind),"fake":note.fake,"target_chart_time":target,"flow":plan.flow(),"plan":plan.name(),"reason":plan.reason(),"minimum_visible":min_visible,"maximum_visible":max_visible,"minimum_has_geometry":minimum.is_some(),"maximum_has_geometry":maximum.is_some(),"target_boundary_flow":boundary_flow,"minimum_candidate_audit":minimum_candidate,"boundary_candidate_audit":boundary_candidate,"original_candidate_audit":original_candidate,"authored_visibility_audit":authored_visibility,"no_bracket_probe":no_bracket_probe,"validation_hz":VALIDATION_HZ,"validation_max_steps":MAX_VALIDATION_STEPS,"constant_motion_absolute_limit_ndc_per_real_second":CONSTANT_MOTION_ABSOLUTE_LIMIT_NDC_PER_REAL_SECOND,"constant_motion_original_tolerance_ndc_per_real_second":CONSTANT_MOTION_ORIGINAL_TOLERANCE_NDC_PER_REAL_SECOND,"constant_motion_metric":"semantic_head_anchor_ndc_per_real_second"})
             })
         }).collect()
     }

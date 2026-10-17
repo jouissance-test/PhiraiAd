@@ -51,6 +51,39 @@ class WorkflowTests(unittest.TestCase):
         self.assertFalse(result["passed"])
         self.assertAlmostEqual(result["cases"][0]["observed_preview_seconds"], 0.096)
 
+    def test_renderer_authored_alpha_constraint_is_reported_separately(self):
+        report = fixture(9.904)
+        report["solver"][0]["authored_visibility_audit"] = {
+            "hidden_samples": 86,
+            "hidden_at_target": True,
+            "hidden_spans": [[9.55, 9.91]],
+        }
+        summary = workflow.analyze(report)
+        self.assertEqual(summary["counts"]["authored_preview_constraint"], 1)
+        self.assertNotIn("preview_timing_mismatch", summary["counts"])
+
+    def test_only_renderer_authored_visibility_gaps_are_exempt(self):
+        report = fixture()
+        report["modes"]["baseline"]["notes"][0]["spans"] = [[9.55, 9.70], [9.80, 9.995]]
+        report["modes"]["fixed"]["notes"][0]["spans"] = [[9.55, 9.70], [9.80, 9.995]]
+        report["solver"][0]["authored_visibility_audit"] = {
+            "hidden_samples": 25,
+            "hidden_at_target": False,
+            "hidden_spans": [[9.70, 9.80]],
+        }
+        summary = workflow.analyze(report)
+        self.assertEqual(summary["counts"]["authored_visibility_gaps"], 1)
+        self.assertNotIn("visibility_gaps", summary["counts"])
+        report["solver"][0]["authored_visibility_audit"]["hidden_spans"] = [[9.72, 9.78]]
+        self.assertEqual(workflow.analyze(report)["counts"]["visibility_gaps"], 1)
+
+    def test_sub_tolerance_single_frame_gap_is_not_a_contract_failure(self):
+        report = fixture()
+        report["modes"]["fixed"]["notes"][0]["spans"] = [[9.55, 9.70], [9.715, 9.995]]
+        summary = workflow.analyze(report)
+        self.assertEqual(summary["counts"]["sub_tolerance_visibility_gap"], 1)
+        self.assertNotIn("visibility_gaps", summary["counts"])
+
     def test_gate_only_is_supported_but_original_is_a_fallback(self):
         report = fixture()
         report["solver"][0].update(plan="gate_only", reason="gate_only")
@@ -155,6 +188,22 @@ class WorkflowTests(unittest.TestCase):
         summary = workflow.analyze(report)
         with self.assertRaisesRegex(ValueError, "insufficient coverage"):
             workflow.compare(summary, summary)
+
+    def test_run_gate_enforces_coverage_and_contract_failures(self):
+        root = Path(tempfile.mkdtemp(prefix="phiraiad-preview-gate-test-"))
+        path = root / "run.json"
+        run = {"engine_failures": 0, "jobs": [
+            {"id": "chart-p0.450", "error": None, "counts": {"eligible_notes": 100, "solver_fallback": 9}},
+            {"id": "chart-p0.450-scenario", "error": None, "counts": {"eligible_notes": 100, "solver_fallback": 50}},
+        ]}
+        path.write_text(json.dumps(run), encoding="utf-8")
+        self.assertTrue(workflow.gate_run(path, 0.90)["passed"])
+        run["jobs"][0]["counts"]["solver_fallback"] = 11
+        path.write_text(json.dumps(run), encoding="utf-8")
+        self.assertFalse(workflow.gate_run(path, 0.90)["passed"])
+        run["jobs"][0]["counts"].update(solver_fallback=0, visibility_gaps=1)
+        path.write_text(json.dumps(run), encoding="utf-8")
+        self.assertFalse(workflow.gate_run(path, 0.90)["passed"])
 
     def test_cli_known_failure_has_nonzero_exit(self):
         # Intentionally leave test artifacts in a clearly named temp directory;

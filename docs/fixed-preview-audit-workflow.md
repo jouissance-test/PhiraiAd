@@ -91,7 +91,7 @@ Linux 下同样使用该 Python 脚本，只需传 Linux 绝对路径。默认�
 
 求解报告中的 `constant` 与 `gate_only` 都是受支持计划：前者采用通过完整区间验证的常量 flow，后者保留原 flow、只从目标时刻开放显示。只有 `original` 才是安全回退，审计器会将它记为 `solver_fallback`，不再对它强求统一预判时长，而是逐项比较 baseline/fixed 的可见帧、spans、首次/末次四边形和运动峰值；任何差异记为 `fallback_visual_mismatch`。提交数量这类纯裁剪优化计数不参与等价判定。已知用例还可用 `allowed_plans` 要求 Note 必须由受支持计划接管，防止“时间碰巧正确但其实已经回退”被误判为修复。
 
-`solver_fallback`、`preview_timing_mismatch`、`visibility_gaps`、`not_visible_near_hit`、`no_fixed_visibility_baseline_visible` 是可量化现象；`speed_amplification_candidate` 与 `screen_interior_appearance_candidate` 只是优先排查线索。谱面有意显隐、Hold 的几何形状变化都可能产生候选，不可把所有 flag 数量当作已确认 Bug 数量。
+`solver_fallback` 是覆盖率指标；`preview_timing_mismatch`、`visibility_gaps`、`not_visible_near_hit`、`no_fixed_visibility_baseline_visible` 和 `fallback_visual_mismatch` 是契约失败。只有求解端独立采样确认同一时段存在 renderer 作者显隐门时，才会分别记作 `authored_preview_constraint`、`authored_visibility_gaps` 或 `authored_near_hit_gap`；单个不超过默认时间容差的间隙记作 `sub_tolerance_visibility_gap`。这些信息项不掩盖无法由作者显隐解释的真实缺口。`speed_amplification_candidate` 与 `screen_interior_appearance_candidate` 仍只是优先排查线索，不可把所有 flag 数量当作已确认 Bug 数量。
 
 预判误差默认容差为 `max(20ms, 2/hz)`。只分析判定前的几何数据，避免未执行判定导致命中后的继续绘制污染指标。扫描边界截断首次出现时标记 censored；零 eligible Note 是覆盖不足而不是通过。不同播放速度下按分段 `chart_delta / speed` 计算 active 可读时长，主动暂停不计入预判时长。设置事件后的过渡窗口不判定统一时长、可见 gaps 或 near-hit 缺口，因为它的轨迹由两个有效计划拼接；过渡窗口以外仍按当前分段计划严格验收。
 
@@ -108,6 +108,14 @@ python3 scripts/preview_audit.py triage /PATH/TO/RUN --out /PATH/TO/RUN/triage.j
 ```
 
 同时生成 `triage.md`，这些是候选现象组，不是已证明的根因组。
+
+整轮机器验收可执行：
+
+```sh
+python3 scripts/preview_audit.py gate /PATH/TO/RUN --minimum-supported-coverage 0.90
+```
+
+该门槛要求所有任务无引擎错误和上述五类契约失败，并要求每个普通整谱任务的受支持计划覆盖率达到指定值；动态设置场景仍检查契约错误，但因多个配置过渡而不参与覆盖率阈值。退出码 `0` 表示全部满足，`1` 表示至少一项未满足，`2` 表示输入或工具错误。门槛失败必须如实保留，不应通过降低阈值掩盖需要阶段 3 动态方案的谱面。
 
 只允许谱包哈希、viewport、资源身份、采样区间、频率和场景等一致的输入。输出新增、消失和仍存在的现象。引擎版本可以不同——这正是回归比较的目的。差异只表示候选现象发生变化，仍需结合已知用例和轨迹判断改善／退化。
 
@@ -142,3 +150,10 @@ python3 scripts/preview_audit.py triage /PATH/TO/RUN --out /PATH/TO/RUN/triage.j
 - Waking 62 秒两个绑定用例均为 `GateOnly`，目标 `450ms`、实测 `446.13ms`、误差 `-3.87ms`，定点检查退出码为 0。
 - 动态场景依次执行 `0.45s/1.0x → 暂停 1.0s → 0.2s/0.8x → 暂停 0.5s → 0.75s/1.2x → 暂停 0.5s → 0.45s/1.0x`。设置切换窗口单列，窗口外没有上述五类契约错误。
 - 完整逐谱统计、MotionSpike 回退数量和测量边界见同目录 `FINAL_REPORT.md`。本轮不连接、不唤醒、不操作手机，因此不把主机生产轨迹审计称为新一轮真机视觉验收。
+
+## 九、覆盖率优化执行记录（2026-10-17）
+
+- 根因复核发现两类过度回退：目标边界候选失败后没有尝试更小但全程安全的常量 flow；绝对 `24 NDC/现实秒` 阈值把谱面作者本来就有的高速整线运动误判成 Fixed Preview 新制造的尖峰。此外，几何求解把 renderer 的 alpha/cover 显隐与“无几何”混为一谈。
+- 新实现仍只产生单个常量计划：最小 flow 安全时以 10 步二分寻找最大的全程安全较小候选；运动保护改为与同一时刻 Original 轨迹比较；纯旅行几何与 renderer 作者显隐分层，renderer 规则保持不变。没有实现阶段 3 的动态/多段 flow。
+- 候选矩阵目录 `D:\phiraiad\audit-runs\20261017-corpus-coverage-final-candidate` 共 16 个任务，引擎错误和五类契约失败均为 0。15 个普通整谱任务中 13 个受支持覆盖率达到 90%；Dear Farthest You 的 `0.45s`/`0.75s` 为 `88.128%`/`82.572%`，因此严格 90% gate 如实返回失败。
+- Dear 剩余回退的主因是目标到击打区间内所有 `0.1..20` 常量 flow 都存在几何离屏；把内部实验下限降到 `0.0001` 也只额外救回极少数 Note，不能解决主体。这类 Note 需要阶段 3 多段 flow 或重写判定线运动，按当前范围保留 Original 比强行接管安全。

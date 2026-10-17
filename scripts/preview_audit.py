@@ -87,6 +87,15 @@ def validate_report(report):
         raise ValueError("Scenario report requires per-setting solver snapshots")
 
 
+def span_gaps(spans):
+    return [[left[1], right[0]] for left, right in zip(spans, spans[1:])]
+
+
+def interval_covered(interval, covers, tolerance):
+    start, end = interval
+    return any(float(cover[0]) <= start + tolerance and float(cover[1]) >= end - tolerance for cover in covers)
+
+
 def analyze(report, tolerance=0.020):
     validate_report(report)
     meta = report["metadata"]
@@ -135,6 +144,10 @@ def analyze(report, tolerance=0.020):
                 "baseline_visible_frames": base.get("visible_frames", 0), "fixed_visible_frames": fixed.get("visible_frames", 0),
                 "flags": [], "measurements": {}}
         flags, metrics = item["flags"], item["measurements"]
+        authored_visibility = state.get("authored_visibility_audit") or {}
+        authored_hidden_spans = authored_visibility.get("hidden_spans") or []
+        chart_margin = margin * speed
+        metrics["authored_hidden_samples"] = int(authored_visibility.get("hidden_samples", 0))
         if not transition and not supported_plan:
             flags.append("solver_fallback")
             # Fixed Preview deliberately makes no timing promise for Original.
@@ -159,17 +172,32 @@ def analyze(report, tolerance=0.020):
             if first_censored:
                 flags.append("first_visibility_left_censored")
             if supported_plan and not transition and not first_censored and abs(observed - preview) > margin:
-                flags.append("preview_timing_mismatch")
+                target = float(state.get("target_chart_time", hit - preview * speed))
+                if interval_covered([target, first], authored_hidden_spans, chart_margin):
+                    flags.append("authored_preview_constraint")
+                else:
+                    flags.append("preview_timing_mismatch")
             spans = fixed.get("spans", [])
             if supported_plan and not transition and len(spans) > 1:
-                flags.append("visibility_gaps")
+                gaps = span_gaps(spans)
+                material_gaps = [gap for gap in gaps if active_seconds(report, gap[0], gap[1]) > margin]
+                if len(material_gaps) != len(gaps):
+                    flags.append("sub_tolerance_visibility_gap")
+                authored_gaps = [gap for gap in material_gaps if interval_covered(gap, authored_hidden_spans, chart_margin)]
+                if authored_gaps:
+                    flags.append("authored_visibility_gaps")
+                if len(authored_gaps) != len(material_gaps):
+                    flags.append("visibility_gaps")
             if spans:
                 last_start, last_end = spans[-1]
                 metrics["last_visible_span_active_seconds"] = active_seconds(report, last_start, last_end)
                 gap = active_seconds(report, last_end, hit)
                 metrics["last_visible_to_hit_gap_seconds"] = gap
                 if supported_plan and not transition and gap > margin:
-                    flags.append("not_visible_near_hit")
+                    if interval_covered([last_end, hit], authored_hidden_spans, chart_margin):
+                        flags.append("authored_near_hit_gap")
+                    else:
+                        flags.append("not_visible_near_hit")
             # A first visible quad wholly inside the viewport indicates a pop-in
             # candidate, not proof: authored alpha events can intentionally do this.
             quads = fixed["first_sample"].get("quads", [])
@@ -303,6 +331,45 @@ def triage_run(directory):
             "groups": sorted(result, key=lambda g: (-g["unique_notes"], g["flag"]))}
 
 
+CONTRACT_FAILURE_FLAGS = (
+    "preview_timing_mismatch",
+    "visibility_gaps",
+    "not_visible_near_hit",
+    "no_fixed_visibility_baseline_visible",
+    "fallback_visual_mismatch",
+)
+
+
+def gate_run(path, minimum_supported_coverage=0.90):
+    if not math.isfinite(minimum_supported_coverage) or not 0.0 <= minimum_supported_coverage <= 1.0:
+        raise ValueError("Minimum supported coverage must be in 0..1")
+    run = json.loads(path.read_text(encoding="utf-8"))
+    results = []
+    passed = run.get("engine_failures") == 0
+    for job in run.get("jobs", []):
+        counts = job.get("counts") or {}
+        eligible = int(counts.get("eligible_notes", 0))
+        fallback = int(counts.get("solver_fallback", 0))
+        coverage = (eligible - fallback) / eligible if eligible else None
+        scenario = job["id"].endswith("-scenario")
+        failures = {flag: int(counts.get(flag, 0)) for flag in CONTRACT_FAILURE_FLAGS if counts.get(flag, 0)}
+        job_passed = not job.get("error") and not failures and (scenario or coverage is not None and coverage >= minimum_supported_coverage)
+        passed &= job_passed
+        results.append({
+            "id": job["id"],
+            "passed": job_passed,
+            "scenario": scenario,
+            "eligible_notes": eligible,
+            "solver_fallback": fallback,
+            "supported_coverage": coverage,
+            "contract_failures": failures,
+            "error": job.get("error"),
+        })
+    if not results:
+        raise ValueError("Run contains no jobs")
+    return {"passed": bool(passed), "minimum_supported_coverage": minimum_supported_coverage, "jobs": results}
+
+
 def engine_path(path):
     text = str(path.resolve())
     if sys.platform == "win32":
@@ -417,6 +484,9 @@ def main():
     triage = commands.add_parser("triage")
     triage.add_argument("run", type=Path)
     triage.add_argument("--out", type=Path, required=True)
+    gate = commands.add_parser("gate")
+    gate.add_argument("run", type=Path)
+    gate.add_argument("--minimum-supported-coverage", type=float, default=0.90)
     args = parser.parse_args()
     try:
         if args.command == "run":
@@ -440,6 +510,10 @@ def main():
             with args.out.with_suffix(".md").open("x", encoding="utf-8") as stream:
                 stream.write("\n".join(rows) + "\n")
             print(json.dumps({"groups": len(result["groups"]), "out": str(args.out)}, ensure_ascii=False))
+        elif args.command == "gate":
+            result = gate_run(args.run, args.minimum_supported_coverage)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0 if result["passed"] else 1
         else:
             print(json.dumps(compare(json.loads(args.previous.read_text(encoding="utf-8")), json.loads(args.current.read_text(encoding="utf-8"))), ensure_ascii=False, indent=2))
         return 0
