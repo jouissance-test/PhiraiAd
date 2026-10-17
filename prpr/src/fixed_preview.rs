@@ -115,6 +115,10 @@ pub(crate) fn solve_flow(mut visible: impl FnMut(f32) -> bool, min: f32, max: f3
 // the 18-call target bracket search; unsupported durations fall back unchanged.
 const VALIDATION_HZ: f64 = 240.;
 const MAX_VALIDATION_STEPS: usize = 1536;
+// Equivalent displacement in one 240Hz real-time frame: 0.1 NDC is 5% of
+// the viewport width, or 24 NDC/real second. Only newly solved Constant motion
+// is constrained; GateOnly preserves the chart's authored trajectory.
+const CONSTANT_MOTION_STEP_LIMIT_NDC: f64 = 0.1;
 
 fn validation_steps(start: f64, hit: f64, playback_rate: f64) -> Option<usize> {
     let steps = ((hit - start) / playback_rate * VALIDATION_HZ).ceil();
@@ -138,7 +142,14 @@ fn visible_interval(start: f64, hit: f64, steps: usize, mut visible: impl FnMut(
     })
 }
 
-fn choose_plan(fake: bool, original_flow: f32, start: f64, hit: f64, playback_rate: f64, mut visible: impl FnMut(f64, f32) -> bool) -> PreviewPlan {
+fn choose_plan(
+    fake: bool,
+    original_flow: f32,
+    start: f64,
+    hit: f64,
+    playback_rate: f64,
+    mut sample: impl FnMut(f64, f32) -> Option<Point>,
+) -> PreviewPlan {
     let original = |reason| PreviewPlan::original(original_flow, reason);
     if fake {
         return original(FallbackReason::FakeNote);
@@ -151,16 +162,35 @@ fn choose_plan(fake: bool, original_flow: f32, start: f64, hit: f64, playback_ra
     };
     // Preserve authored motion whenever gating alone already supplies a full
     // readable interval. Do not accelerate a reversing trajectory needlessly.
-    if visible_interval(start, hit, steps, |time| visible(time, original_flow)) {
+    if visible_interval(start, hit, steps, |time| sample(time, original_flow).is_some()) {
         return PreviewPlan::GateOnly { original_flow, start };
     }
-    let Some(flow) = solve_flow(|flow| visible(start, flow), NOTE_FLOW_SPEED_MIN, NOTE_FLOW_SPEED_MAX) else {
+    let Some(flow) = solve_flow(|flow| sample(start, flow).is_some(), NOTE_FLOW_SPEED_MIN, NOTE_FLOW_SPEED_MAX) else {
         return original(FallbackReason::NoBracket);
     };
-    if visible_interval(start, hit, steps, |time| visible(time, flow)) {
+    let mut previous: Option<(f64, Point)> = None;
+    let mut motion_spike = false;
+    let accepted = visible_interval(start, hit, steps, |time| {
+        let Some(anchor) = sample(time, flow) else { return false };
+        if let Some((previous_time, previous_anchor)) = previous {
+            let real_dt = (time - previous_time) / playback_rate;
+            let equivalent_step = (anchor - previous_anchor).norm() as f64 / real_dt / VALIDATION_HZ;
+            if !equivalent_step.is_finite() || equivalent_step > CONSTANT_MOTION_STEP_LIMIT_NDC {
+                motion_spike = true;
+                return false;
+            }
+        }
+        previous = Some((time, anchor));
+        true
+    });
+    if accepted {
         PreviewPlan::Constant { flow, start }
     } else {
-        original(FallbackReason::VisibilityGap)
+        original(if motion_spike {
+            FallbackReason::MotionSpike
+        } else {
+            FallbackReason::VisibilityGap
+        })
     }
 }
 
@@ -237,7 +267,12 @@ fn preview_ndc(res: &Resource, point: Point) -> Point {
     Point::new((point.x - cx) * scale, (point.y + cy) * scale * res.aspect_ratio)
 }
 
-fn note_quad_at(chart: &Chart, line_id: usize, note_id: usize, res: &Resource, time: f64, flow: f32) -> Option<[[Point; 4]; 3]> {
+struct NoteGeometry {
+    quads: [[Point; 4]; 3],
+    anchor: Point,
+}
+
+fn note_geometry_at(chart: &Chart, line_id: usize, note_id: usize, res: &Resource, time: f64, flow: f32) -> Option<NoteGeometry> {
     let line = &chart.lines[line_id];
     let note = &line.notes[note_id];
     if !time.is_finite() || !flow.is_finite() || flow <= 0. || res.aspect_ratio.abs() <= f32::EPSILON {
@@ -290,7 +325,7 @@ fn note_quad_at(chart: &Chart, line_id: usize, note_id: usize, res: &Resource, t
         incline_sin: sample(&line.incline, time, 0.).to_radians().sin(),
         aspect_ratio: res.aspect_ratio,
     };
-    let (note_transform, local, cover_base) = match note.kind {
+    let (note_transform, local, cover_base, anchor_local) = match note.kind {
         NoteKind::Hold { end_time, end_height } => {
             let end_height = if res.config.shorten_holds && !note.fake {
                 let visual_end =
@@ -333,12 +368,13 @@ fn note_quad_at(chart: &Chart, line_id: usize, note_id: usize, res: &Resource, t
                     local_rect(-half_width, tail_y, half_width, tail_y + tail_half * 2.),
                 ],
                 cover_base,
+                Point::new(0., head),
             )
         }
         _ => {
             let texture = texture_for(note, res);
             let half_height = texture.height() / texture.width() * half_width;
-            (geometry.matrix(base, flow), [local_rect(-half_width, -half_height, half_width, half_height); 3], base as f64)
+            (geometry.matrix(base, flow), [local_rect(-half_width, -half_height, half_width, half_height); 3], base as f64, Point::origin())
         }
     };
     let line_alpha = sample(&line.object.alpha, time, 1.);
@@ -366,12 +402,20 @@ fn note_quad_at(chart: &Chart, line_id: usize, note_id: usize, res: &Resource, t
         transform *= Matrix::identity().append_nonuniform_scaling(&Vector::new(1., -1.));
     }
     transform *= note_transform;
+    // Semantic Note anchor: Tap center, or Hold head travel position before
+    // texture offsets. It cannot jump when body length/topology/skin changes.
+    let anchor = preview_ndc(res, transform.transform_point(&anchor_local));
     let quads = local.map(|quad| quad.map(|point| preview_ndc(res, transform.transform_point(&point))));
     quads
         .iter()
         .flatten()
+        .chain(std::iter::once(&anchor))
         .all(|point| point.x.is_finite() && point.y.is_finite())
-        .then_some(quads)
+        .then_some(NoteGeometry { quads, anchor })
+}
+
+fn note_quad_at(chart: &Chart, line_id: usize, note_id: usize, res: &Resource, time: f64, flow: f32) -> Option<[[Point; 4]; 3]> {
+    note_geometry_at(chart, line_id, note_id, res, time, flow).map(|geometry| geometry.quads)
 }
 
 fn geometry_visible(quads: [[Point; 4]; 3]) -> bool {
@@ -381,7 +425,9 @@ fn geometry_visible(quads: [[Point; 4]; 3]) -> bool {
 fn note_plan(chart: &Chart, line_id: usize, note_id: usize, res: &Resource, preview_chart_seconds: f64) -> PreviewPlan {
     let note = &chart.lines[line_id].notes[note_id];
     choose_plan(note.fake, res.note_flow_speed, note.time - preview_chart_seconds, note.time, res.config.speed as f64, |time, flow| {
-        note_quad_at(chart, line_id, note_id, res, time, flow).is_some_and(geometry_visible)
+        note_geometry_at(chart, line_id, note_id, res, time, flow)
+            .filter(|geometry| geometry_visible(geometry.quads))
+            .map(|geometry| geometry.anchor)
     })
 }
 
@@ -398,7 +444,7 @@ impl Chart {
                 let min_visible = minimum.is_some_and(geometry_visible);
                 let max_visible = maximum.is_some_and(geometry_visible);
                 let plan = note_plan(self, line_id, note_id, res, preview_chart_seconds);
-                serde_json::json!({"line":line_id,"note":note_id,"time":note.time,"kind":format!("{:?}", note.kind),"fake":note.fake,"target_chart_time":target,"flow":plan.flow(),"plan":plan.name(),"reason":plan.reason(),"minimum_visible":min_visible,"maximum_visible":max_visible,"minimum_has_geometry":minimum.is_some(),"maximum_has_geometry":maximum.is_some(),"validation_hz":VALIDATION_HZ,"validation_max_steps":MAX_VALIDATION_STEPS})
+                serde_json::json!({"line":line_id,"note":note_id,"time":note.time,"kind":format!("{:?}", note.kind),"fake":note.fake,"target_chart_time":target,"flow":plan.flow(),"plan":plan.name(),"reason":plan.reason(),"minimum_visible":min_visible,"maximum_visible":max_visible,"minimum_has_geometry":minimum.is_some(),"maximum_has_geometry":maximum.is_some(),"validation_hz":VALIDATION_HZ,"validation_max_steps":MAX_VALIDATION_STEPS,"constant_motion_step_limit_ndc":CONSTANT_MOTION_STEP_LIMIT_NDC,"constant_motion_speed_limit_ndc_per_real_second":CONSTANT_MOTION_STEP_LIMIT_NDC*VALIDATION_HZ,"constant_motion_metric":"semantic_head_anchor_ndc_per_real_second"})
             })
         }).collect()
     }

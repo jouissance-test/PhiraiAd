@@ -20,6 +20,7 @@ pub enum FallbackReason {
     ValidationBudget,
     NoBracket,
     VisibilityGap,
+    MotionSpike,
 }
 
 impl FallbackReason {
@@ -31,6 +32,7 @@ impl FallbackReason {
             Self::ValidationBudget => "validation_budget_exceeded",
             Self::NoBracket => "no_valid_bracket",
             Self::VisibilityGap => "visibility_interval_rejected",
+            Self::MotionSpike => "motion_spike",
         }
     }
 }

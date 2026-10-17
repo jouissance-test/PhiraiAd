@@ -256,12 +256,83 @@ fn reversing_scroll_must_not_accept_a_single_target_boundary_contact() {
 }
 
 #[test]
+fn fully_visible_constant_candidate_with_a_motion_spike_restores_original() {
+    use phira_chart_play_tests::anim::Keyframe;
+    let res = resource();
+    let mut chart = carrier_chart(1.);
+    chart.lines[0].height = core::AnimFloat::new(vec![Keyframe::new(9.55, 0., 0), Keyframe::new(10., 4., 0)]);
+    chart.lines[0].object.translation.0 = core::AnimFloat::new(vec![
+        Keyframe::new(9.55, -0.4, 0),
+        Keyframe::new(9.75, -0.4, 0),
+        Keyframe::new(9.75001, 0.4, 0),
+        Keyframe::new(10., 0.4, 0),
+    ]);
+    let candidate = solved(&chart, &res, 9.55).unwrap();
+    assert!(candidate < 1.);
+    for i in 0..=108 {
+        let time = 9.55 + 0.45 * i as f64 / 108.;
+        assert!(note_quad_at(&chart, 0, 0, &res, time, candidate).is_some_and(geometry_visible));
+    }
+    let plan = note_plan(&chart, 0, 0, &res, 0.45);
+    assert_eq!(plan.reason(), "motion_spike", "all-visible candidate must still reject its 0.8-NDC jump: {plan:?}");
+    assert_eq!(plan.flow(), 1.);
+    assert!(!plan.hides(false, 0.));
+}
+
+#[test]
+fn gate_only_preserves_authored_motion_spikes() {
+    let plan = choose_plan(false, 1., 9.55, 10., 1., |time, _| Some(Point::new(if time < 9.75 { -0.4 } else { 0.4 }, 0.)));
+    assert!(matches!(plan, PreviewPlan::GateOnly { original_flow: 1., .. }));
+}
+
+#[test]
+fn constant_motion_guard_normalizes_chart_steps_to_real_time() {
+    // Nonintegral duration*240 exercises ceil-spaced steps and hit-left-limit.
+    // Both playback rates must apply the same 24-NDC/real-second threshold.
+    for rate in [0.5, 1., 2.] {
+        for (real_velocity, rejected) in [(23.9, false), (24.1, true)] {
+            let start = 9.54321;
+            let plan = choose_plan(false, 1., start, 10., rate, |time, flow| {
+                (flow <= 0.5).then_some(Point::new(((time - start) * real_velocity / rate) as f32, 0.))
+            });
+            assert_eq!(plan.reason() == "motion_spike", rejected, "rate={rate}, velocity={real_velocity}, {plan:?}");
+            if !rejected {
+                assert!(matches!(plan, PreviewPlan::Constant { .. }));
+            }
+        }
+    }
+}
+
+#[test]
+fn hold_motion_anchor_is_semantic_head_and_ignores_tail_and_skin_offsets() {
+    let res = resource();
+    let mut chart = carrier_chart(1.);
+    chart.lines[0].notes[0].height = 0.4;
+    chart.lines[0].notes[0].kind = NoteKind::Hold {
+        end_time: 11.,
+        end_height: 5.,
+    };
+    let first = note_geometry_at(&chart, 0, 0, &res, 9.55, 0.5).unwrap();
+    // Reflection maps the semantic pre-hit head to -height*flow in NDC.
+    assert!((first.anchor.y + 0.2).abs() < 1e-6);
+    chart.lines[0].notes[0].kind = NoteKind::Hold {
+        end_time: 11.,
+        end_height: 0.5,
+    };
+    let mut compact = resource();
+    compact.res_pack.info.hold_compact = true;
+    let second = note_geometry_at(&chart, 0, 0, &compact, 9.55, 0.5).unwrap();
+    assert_eq!(first.anchor, second.anchor);
+    assert_ne!(first.quads, second.quads);
+}
+
+#[test]
 fn interval_failure_restores_original_flow_and_has_no_time_gate() {
     // Both flows leave the viewport during the interval. The target still has
     // a valid bisection bracket, so rejecting only failed brackets is unsafe.
     let plan = choose_plan(false, 1., 9.55, 10., 1., |time, flow| {
         let distance = if time > 9.56 && time < 9.9 { 20. } else { 0.145 };
-        distance * flow <= 1.
+        (distance * flow <= 1.).then_some(Point::origin())
     });
     assert_eq!(
         plan,
@@ -276,7 +347,7 @@ fn interval_failure_restores_original_flow_and_has_no_time_gate() {
 
 #[test]
 fn monotone_approach_can_use_constant_flow_when_original_is_outside_at_target() {
-    let plan = choose_plan(false, 1., 9., 10., 1., |time, flow| (10. - time) * 2. * flow as f64 <= 1.);
+    let plan = choose_plan(false, 1., 9., 10., 1., |time, flow| ((10. - time) * 2. * flow as f64 <= 1.).then_some(Point::origin()));
     assert!(matches!(plan, PreviewPlan::Constant { flow, start: 9. } if (flow - 0.5).abs() < 0.001));
     assert!(plan.hides(false, 8.99));
     assert!(!plan.hides(false, 9.));
@@ -287,12 +358,12 @@ fn validation_rejects_late_gap_and_caps_work_independent_of_duration() {
     let mut calls = 0;
     let plan = choose_plan(false, 1., 0., 100., 1., |_, _| {
         calls += 1;
-        true
+        Some(Point::origin())
     });
     assert_eq!(plan.reason(), "validation_budget_exceeded");
     assert_eq!(calls, 0);
     for gap in [9.5501..9.57, 9.7..9.73, 9.99..10.] {
-        let plan = choose_plan(false, 1., 9.55, 10., 1., |time, flow| !gap.contains(&time) && flow <= 3.);
+        let plan = choose_plan(false, 1., 9.55, 10., 1., |time, flow| (!gap.contains(&time) && flow <= 3.).then_some(Point::origin()));
         assert!(
             matches!(
                 plan,
