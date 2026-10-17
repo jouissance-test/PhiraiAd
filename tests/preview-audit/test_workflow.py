@@ -198,6 +198,7 @@ class WorkflowTests(unittest.TestCase):
         ]}
         path.write_text(json.dumps(run), encoding="utf-8")
         self.assertTrue(workflow.gate_run(path, 0.90)["passed"])
+        self.assertTrue(workflow.gate_run(root, 0.90)["passed"])
         run["jobs"][0]["counts"]["solver_fallback"] = 11
         path.write_text(json.dumps(run), encoding="utf-8")
         self.assertFalse(workflow.gate_run(path, 0.90)["passed"])

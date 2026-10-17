@@ -155,5 +155,6 @@ python3 scripts/preview_audit.py gate /PATH/TO/RUN --minimum-supported-coverage 
 
 - 根因复核发现两类过度回退：目标边界候选失败后没有尝试更小但全程安全的常量 flow；绝对 `24 NDC/现实秒` 阈值把谱面作者本来就有的高速整线运动误判成 Fixed Preview 新制造的尖峰。此外，几何求解把 renderer 的 alpha/cover 显隐与“无几何”混为一谈。
 - 新实现仍只产生单个常量计划：最小 flow 安全时以 10 步二分寻找最大的全程安全较小候选；运动保护改为与同一时刻 Original 轨迹比较；纯旅行几何与 renderer 作者显隐分层，renderer 规则保持不变。没有实现阶段 3 的动态/多段 flow。
-- 候选矩阵目录 `D:\phiraiad\audit-runs\20261017-corpus-coverage-final-candidate` 共 16 个任务，引擎错误和五类契约失败均为 0。15 个普通整谱任务中 13 个受支持覆盖率达到 90%；Dear Farthest You 的 `0.45s`/`0.75s` 为 `88.128%`/`82.572%`，因此严格 90% gate 如实返回失败。
+- 最终矩阵目录 `D:\phiraiad\audit-runs\20261017-corpus-coverage-final` 共 16 个任务，引擎错误和五类契约失败均为 0。生产算法提交为 `a990c41b8025a1f79b05b95ca14f1fff48136b95`；固定审计引擎位于 `D:\phiraiad\artifacts\preview-audit-a990c41`，SHA-256 为 `62061f98ba55cf787cd710f5080d15abad7c018ef73094cea55509c050bcebf2`。15 个普通整谱任务中 13 个受支持覆盖率达到 90%；Dear Farthest You 的 `0.45s`/`0.75s` 为 `88.128%`/`82.572%`，因此严格 90% gate 如实返回失败。
+- 15 个任务的加权覆盖率由首版 `88.313%` 提升到 `97.975%`，Original 回退由 4450 降到 771；完整逐谱数字、回退原因和测量边界见同目录 `FINAL_REPORT.md`。
 - Dear 剩余回退的主因是目标到击打区间内所有 `0.1..20` 常量 flow 都存在几何离屏；把内部实验下限降到 `0.0001` 也只额外救回极少数 Note，不能解决主体。这类 Note 需要阶段 3 多段 flow 或重写判定线运动，按当前范围保留 Original 比强行接管安全。

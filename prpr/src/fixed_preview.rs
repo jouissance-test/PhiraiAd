@@ -473,6 +473,7 @@ fn note_geometry_at(chart: &Chart, line_id: usize, note_id: usize, res: &Resourc
     note_geometry_at_diagnostic(chart, line_id, note_id, res, time, flow).ok()
 }
 
+#[allow(dead_code)]
 fn note_quad_at(chart: &Chart, line_id: usize, note_id: usize, res: &Resource, time: f64, flow: f32) -> Option<[[Point; 4]; 3]> {
     note_geometry_at(chart, line_id, note_id, res, time, flow).map(|geometry| geometry.quads)
 }

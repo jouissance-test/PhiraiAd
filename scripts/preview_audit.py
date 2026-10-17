@@ -343,6 +343,8 @@ CONTRACT_FAILURE_FLAGS = (
 def gate_run(path, minimum_supported_coverage=0.90):
     if not math.isfinite(minimum_supported_coverage) or not 0.0 <= minimum_supported_coverage <= 1.0:
         raise ValueError("Minimum supported coverage must be in 0..1")
+    if path.is_dir():
+        path = path / "run.json"
     run = json.loads(path.read_text(encoding="utf-8"))
     results = []
     passed = run.get("engine_failures") == 0
