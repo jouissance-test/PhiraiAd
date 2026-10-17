@@ -166,3 +166,17 @@ cargo test --offline --manifest-path tests/chart-play/Cargo.toml \
 - 设置迁移与实验性标注的真机截图：`D:\phiraiad\artifacts\phiraiad-replica.png`。应用覆盖安装保留原有谱面与账号，不卸载或清数据。
 - 最终包：`D:\phiraiad\artifacts\PhiraiAd-fixed-preview-test3-arm64.apk`，版本 `1.6.0-fixed-preview-test3` / `12004`，SHA-256 `ce005ea5c2d53b112972fb76936faac4426967a80be2366be7558ce3798a1c41`。本地测试证书的 v1/v2/v3 签名、16 KiB 对齐、ZIP CRC、manifest、原生库匹配检查均通过；随后 ADB 覆盖安装成功，并以 `dumpsys package` 核对安装版本。
 - 最终包真机确认：暂停页实验性文字无重叠；滑条最右端为 `0.750`，减一次为 `0.749`、加回后继续加仍为 `0.750`。最终 `0.750 s` 运行录屏保存为 `D:\phiraiad\artifacts\phiraiad-final-0750.mp4`，控件截图为 `phiraiad-final-pause.png` / `phiraiad-final-step.png`。完成后退出播放、返回 Android 桌面，恢复测试前的充电常亮配置值 `15`，发送 `KEYCODE_SLEEP`，设备进入息屏/Dozing 状态（不更改用户的息屏显示偏好）。
+
+## 9. 2026-10-17 最终逐 Note 计划与自动审计闭环
+
+首版“求出单个 flow，失败也保留统一时间门”的组合会在反向运动、显隐窗口和高速父线运动中制造两类问题：flow 虽在目标点可见，却不能保证目标到击打全程可见；求解失败后若仍保留时间门，也不再等价于关闭功能的原谱。最终实现把每个非 fake Note 明确分成三个视觉计划：
+
+- `GateOnly`：原始 flow 在目标到击打的完整区间已经可见，只增加目标时间门；
+- `Constant`：候选常量 flow 通过同一生产几何采样器的完整区间验证和运动保护后才接管；
+- `Original`：无法认证时同时恢复原始 flow 与原始显隐，不保留时间门。
+
+生产渲染和求解采样共用 `note_visual.rs` 的 Note 变换语义；Hold 的 head/body/tail 共用一份计划。区间验证按现实时间 240Hz 采样，最多 1536 步，不实现阶段 3 的多段动态 flow 搜索。`Constant` 的语义头锚点若超过 `24 NDC/现实秒`，就以 `motion_spike` 回退 `Original`；这是保守产品阈值，并不限制保留原谱运动的 `GateOnly`。完整语义和边界见 `docs/fixed-preview-plans.md`。
+
+暂停页 `fixed_preview_time` 的减号/加号现在保留短按 `0.001s` 单步，并在按住约 `350ms` 后按真实单调时钟重复，速率约从 7 步/秒加速到 22 步/秒；松开不再额外多走一步。长按只作用于统一预判时间，其他练习滑条保持原来的点击行为。全局入口仍位于“改版设置 → 改版玩法”，暂停页与设置页继续标明“实验性功能”，持久化范围为 `0.100..0.750s`。
+
+最终五谱矩阵以真实生产 renderer 捕获而不是视频识别：5 张谱的 `0.2/0.45/0.75s` 三档，加一组暂停、变速、途中修改预判，共 16 个任务且无引擎失败。Waking `62.246s` 的 Hold/Click 在 `0.45s` 下实测 `446.13ms`，误差 `-3.87ms`；五类严重契约错误在全部任务中均为 0。详细数量、候选信号和未覆盖边界见 `D:\phiraiad\audit-runs\20261017-corpus-motion-final\FINAL_REPORT.md`。本轮没有连接或操作手机，结果不冒充真机 framebuffer 或肉眼体验验收。

@@ -53,7 +53,7 @@ python3 scripts/preview_audit.py check \
 - `1`：已知行为问题仍存在，必须继续诊断；
 - `2`：输入、校准、配置或覆盖不足，**不能当作通过**。
 
-当前已知失败不是回退：line 4 的 Hold（当前解析索引 0）及 Click（索引 27）均在 `62.2461288356` 秒判定。目标 `450ms`，flow 约 `6.894 / 6.887`，实际绘制数据测得首次可见至判定约 `96.13ms`，比目标少约 `353.87ms`。检查命令已实际返回 `1`。用例按谱包哈希、line、判定时间与 Note 类型绑定，不把易变化的排序索引当作唯一身份；该用例尚未修复，不应为了让工具测试绿而修改期望值。
+这个用例最初确实检出了实现缺陷：line 4 的 Hold（当前解析索引 0）及 Click（索引 27）均在 `62.2461288356` 秒判定，旧实现目标 `450ms`、实际只有约 `96.13ms`，检查命令返回 `1`。最终逐 Note 计划实现让两者选择 `GateOnly`，生产轨迹测得 `446.13ms`，误差约 `-3.87ms`，检查命令返回 `0`。用例仍按谱包哈希、line、判定时间与 Note 类型绑定，并要求 `constant` 或 `gate_only` 支持计划，不能靠改索引、放宽目标或回退 `original` 获得假绿。
 
 ### 4.2 三档预判、5 张谱和中途修改
 
@@ -124,7 +124,7 @@ python3 scripts/preview_audit.py triage /PATH/TO/RUN --out /PATH/TO/RUN/triage.j
 
 数据量可达约 GB 级，语料和报告保存在仓库外；该流程不自动删除任何旧文件。
 
-## 七、本轮已执行记录（2026-10-16）
+## 七、历史基线执行记录（2026-10-16）
 
 - 5 张谱均已复制到电脑并完成压缩包 CRC 校验；手机之后不再参与开发或运行。
 - 批量报告目录：`D:\phiraiad\audit-runs\20261016-corpus-v2`，15 个整谱三档任务加 1 个整谱设置变化任务全部完成，无引擎失败。任务引擎耗时合计 `266.83 s`（不含构建及 Python 报告处理），单任务约 `9–26 s`。
@@ -133,3 +133,12 @@ python3 scripts/preview_audit.py triage /PATH/TO/RUN --out /PATH/TO/RUN/triage.j
 - 本轮引擎二进制保存为 `D:\phiraiad\artifacts\preview-audit-49a6cf9d`，SHA-256 `49a6cf9d8a549422881993a3dcf26cfba445c7de30471544c142f3664a82970a`，构建源码与工具提交 `e72fff5` 的引擎内容一致。保留固定二进制避免后续构建覆盖正在运行的任务；每份 raw 报告还自记 binary 和资源包身份。
 - 本轮只建立观测与回归循环，没有修改运动算法、没有宣称修复 62 秒问题，也没有生成或安装新 Android APK。
 - 主代理复跑：39 项配置/几何/策略/UI/暂停与热更新测试、4 项扫描引擎指标测试、14 项 Python 工作流测试全部通过。它们验证工具和既有行为；独立的 62 秒游戏行为检查仍为红色。
+
+## 八、最终计划实现执行记录（2026-10-17）
+
+- 生产代码修订 `2c802ada1a34917a9607b11ad5c0a3ad11e85325`；审计引擎保存为 `D:\phiraiad\artifacts\preview-audit-2c802ada1a34`，SHA-256 为 `917d6f309bc707b2f000b8bfc49c00fc9f7a97e19dfbb698b4528a7879ea4366`。
+- 最终完整目录：`D:\phiraiad\audit-runs\20261017-corpus-motion-final`。5 张谱三档加 Waking 动态设置场景共 16 个任务，引擎失败与校准失败均为 0。
+- `preview_timing_mismatch`、`visibility_gaps`、`not_visible_near_hit`、`no_fixed_visibility_baseline_visible`、`fallback_visual_mismatch` 五类契约错误在 16 个任务中均为 0。启发式“屏内首次出现”和“速度放大”候选仍单列，未被包装成已确认 Bug 或全通过结论。
+- Waking 62 秒两个绑定用例均为 `GateOnly`，目标 `450ms`、实测 `446.13ms`、误差 `-3.87ms`，定点检查退出码为 0。
+- 动态场景依次执行 `0.45s/1.0x → 暂停 1.0s → 0.2s/0.8x → 暂停 0.5s → 0.75s/1.2x → 暂停 0.5s → 0.45s/1.0x`。设置切换窗口单列，窗口外没有上述五类契约错误。
+- 完整逐谱统计、MotionSpike 回退数量和测量边界见同目录 `FINAL_REPORT.md`。本轮不连接、不唤醒、不操作手机，因此不把主机生产轨迹审计称为新一轮真机视觉验收。
