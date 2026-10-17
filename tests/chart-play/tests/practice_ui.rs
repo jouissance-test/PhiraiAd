@@ -1,11 +1,13 @@
 //! Real slider, button and touch-consumption code with recording graphics/input adapters.
 #![allow(dead_code)]
-use std::{cell::RefCell,collections::HashMap,ops::Range};
+use std::{cell::{Cell,RefCell},collections::HashMap,ops::Range};
 use phira_chart_play_tests::{practice_speed,practice_view};
 thread_local! {
     static STATE:RefCell<HashMap<String,Option<u64>>>=RefCell::new(HashMap::new());
     static REQUEST:RefCell<Option<(String,String)>>=const{RefCell::new(None)};
+    static REAL_TIME:Cell<f64>=const{Cell::new(0.)};
 }
+fn get_time()->f64{REAL_TIME.with(Cell::get)}
 #[derive(Clone,Copy,Debug)]struct Vec2{x:f32,y:f32}
 #[derive(Clone,Copy,Debug)]struct Rect{x:f32,y:f32,w:f32,h:f32}
 impl Rect {
@@ -44,9 +46,56 @@ impl Text<'_>{
     fn draw(self)->Rect{Rect::new(self.x,self.y,(self.count as f32*self.size*0.06).min(self.width),self.size*0.1)}
 }
 include!(concat!(env!("OUT_DIR"),"/practice_slider.rs"));
+fn fixed_preview_frame(value:&mut f32,time:f64,phase:TouchPhase)->Ui {
+    REAL_TIME.with(|clock|clock.set(time));
+    let mut ui=Ui{touches:Some(vec![Touch{id:71,position:Vec2{x:0.58,y:0.115},phase}]),..Default::default()};
+    ui.practice_speed_slider("fixed_preview_time","Preview",0.1..0.75,0.001,value,Some(0.4));
+    ui
+}
 fn frame(value:&mut f32,id:&str,x:f32,y:f32,phase:TouchPhase)->Ui {
     let mut ui=Ui{touches:Some(vec![Touch{id:7,position:Vec2{x,y},phase}]),..Default::default()};
     ui.practice_speed_slider(id,"Speed",0.05..10.,0.05,value,Some(0.46));ui
+}
+#[test]
+fn fixed_preview_short_press_changes_one_step_and_long_press_repeats_then_stops(){
+    let mut value=0.45;
+    fixed_preview_frame(&mut value,20.0,TouchPhase::Started);
+    assert_eq!(value,0.45);
+    fixed_preview_frame(&mut value,20.1,TouchPhase::Ended);
+    assert!((value-0.451).abs()<1e-6);
+
+    fixed_preview_frame(&mut value,30.0,TouchPhase::Started);
+    fixed_preview_frame(&mut value,30.34,TouchPhase::Stationary);
+    assert!((value-0.451).abs()<1e-6);
+    fixed_preview_frame(&mut value,30.35,TouchPhase::Stationary);
+    assert!((value-0.452).abs()<1e-6);
+    fixed_preview_frame(&mut value,30.75,TouchPhase::Stationary);
+    let early_steps=value-0.452;
+    fixed_preview_frame(&mut value,31.15,TouchPhase::Stationary);
+    let before_late_window=value;
+    fixed_preview_frame(&mut value,31.55,TouchPhase::Stationary);
+    assert!(value-before_late_window>early_steps);
+    let released=value;
+    fixed_preview_frame(&mut value,31.56,TouchPhase::Ended);
+    assert_eq!(value,released);
+    fixed_preview_frame(&mut value,32.0,TouchPhase::Moved);
+    assert_eq!(value,released);
+}
+
+#[test]
+fn other_practice_value_buttons_remain_single_step_after_a_long_hold(){
+    let mut value=100.0;
+    let plus=Rect::new(0.54,0.075,0.08,0.08).center();
+    for (time,phase) in [(40.0,TouchPhase::Started),(41.0,TouchPhase::Stationary)] {
+        REAL_TIME.with(|clock|clock.set(time));
+        let mut ui=Ui{touches:Some(vec![Touch{id:72,position:plus,phase}]),..Default::default()};
+        ui.practice_value_slider("exercise_view_scale","Scale",practice_view::SCALE,&mut value,Some(0.4));
+    }
+    assert_eq!(value,100.0);
+    REAL_TIME.with(|clock|clock.set(41.1));
+    let mut ui=Ui{touches:Some(vec![Touch{id:72,position:plus,phase:TouchPhase::Ended}]),..Default::default()};
+    ui.practice_value_slider("exercise_view_scale","Scale",practice_view::SCALE,&mut value,Some(0.4));
+    assert_eq!(value,101.0);
 }
 #[test]
 fn dragging_visits_both_extremes_and_exact_midpoint(){

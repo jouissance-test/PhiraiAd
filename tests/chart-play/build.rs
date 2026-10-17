@@ -30,7 +30,17 @@ fn main() {
     let clicked = &source[source.find("    fn clicked(").unwrap()..source.find("    pub fn accent(").unwrap()];
     let button = &source[source.find("    pub fn button(").unwrap()..source.find("    pub fn checkbox(").unwrap()];
     let checkbox = &source[source.find("    pub fn checkbox(").unwrap()..source.find("    pub fn input<").unwrap()];
-    std::fs::write(out.join("practice_slider.rs"), format!("impl Ui {{\n{slider}\n{clicked}\n{button}\n{checkbox}\n}}\n")).unwrap();
+    let hold_state_start = source.find("struct HoldRepeatButton {").unwrap();
+    let hold_state_start = source[..hold_state_start].rfind("#[derive(Clone, Copy, Default)]").unwrap();
+    let hold_state_end = source[hold_state_start..].find("pub struct InputParams").unwrap() + hold_state_start;
+    let hold_state = &source[hold_state_start..hold_state_end];
+    std::fs::write(
+        out.join("practice_slider.rs"),
+        format!(
+            "{hold_state}\nthread_local! {{ static HOLD_REPEAT_STATE: RefCell<HashMap<String, HoldRepeatButton>> = RefCell::new(HashMap::new()); }}\nimpl Ui {{\n{slider}\n{clicked}\n{button}\n{checkbox}\n}}\n"
+        ),
+    )
+    .unwrap();
     let path = "../../prpr/src/ui/chart_play_editor.rs";
     println!("cargo:rerun-if-changed={path}");
     let code = std::fs::read_to_string(path).unwrap();
