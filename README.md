@@ -85,14 +85,3 @@ Phira、Phigros 以及相关名称、音乐、曲绘、谱面和其他资源的�
 
 本仓库的开源许可仅适用于有权按照相应许可证分发的代码和资源。
 
-
-
-
-## 开发者参考
-
-开发工具路径清单与架构图 Mermaid 源码见 [docs/agent-reference/](docs/agent-reference/)。
-
-## 开发者参考
-
-开发工具路径清单与架构图 Mermaid 源码见 [docs/agent-reference/](docs/agent-reference/)。
-
