@@ -90,6 +90,7 @@ pub struct JudgeLineCache {
     not_plain_count: usize,
     above_indices: Vec<usize>,
     below_indices: Vec<usize>,
+    fixed_preview_plans: Vec<crate::fixed_preview_policy::PreviewPlan>,
 }
 
 impl JudgeLineCache {
@@ -101,6 +102,7 @@ impl JudgeLineCache {
             not_plain_count: 0,
             above_indices: Vec::new(),
             below_indices: Vec::new(),
+            fixed_preview_plans: Vec::new(),
         };
         res.reset(notes);
         res
@@ -119,6 +121,7 @@ impl JudgeLineCache {
             not_plain_count: 0,
             above_indices: Vec::new(),
             below_indices: Vec::new(),
+            fixed_preview_plans: Vec::new(),
         };
         cache.reset(notes);
         cache
@@ -150,6 +153,25 @@ impl JudgeLineCache {
                 }
             }
         }
+    }
+
+    pub(crate) fn set_fixed_preview_plans(&mut self, plans: Vec<crate::fixed_preview_policy::PreviewPlan>) {
+        self.fixed_preview_plans = plans;
+    }
+
+    pub(crate) fn fixed_preview_plan(&self, note: usize, fallback: f32) -> crate::fixed_preview_policy::PreviewPlan {
+        use crate::fixed_preview_policy::{FallbackReason, PreviewPlan};
+        match self.fixed_preview_plans.get(note).copied() {
+            // Fallback means the current original visual, including a changed
+            // global/practice flow before the next plan-cache synchronization.
+            Some(PreviewPlan::Original { reason, .. }) => PreviewPlan::original(fallback, reason),
+            Some(plan) => plan,
+            None => PreviewPlan::original(fallback, FallbackReason::Disabled),
+        }
+    }
+
+    pub(crate) fn fixed_preview_flow(&self, note: usize, fallback: f32) -> f32 {
+        self.fixed_preview_plan(note, fallback).flow()
     }
 }
 
@@ -248,12 +270,19 @@ impl JudgeLine {
     }
 
     pub fn now_transform(&self, res: &Resource, lines: &[JudgeLine]) -> Matrix {
-        Rotation2::new(self.fetch_rot(lines).to_radians())
-            .to_homogeneous()
-            .append_translation(&self.fetch_pos(res, lines))
+        crate::note_visual::line_transform(self.fetch_rot(lines), self.fetch_pos(res, lines))
     }
 
-    pub fn render(&self, ui: &mut Ui, res: &mut Resource, lines: &[JudgeLine], bpm_list: &mut BpmList, settings: &ChartSettings, id: usize, transform: Option<Matrix>) {
+    pub fn render(
+        &self,
+        ui: &mut Ui,
+        res: &mut Resource,
+        lines: &[JudgeLine],
+        bpm_list: &mut BpmList,
+        settings: &ChartSettings,
+        id: usize,
+        transform: Option<Matrix>,
+    ) {
         let alpha = self.object.alpha.now_opt().unwrap_or(1.0) * res.alpha;
         let color = self.color.now_opt();
         let line_scaled = (self.object.scale.1.now() - 1.).abs() > 1e-4;
@@ -265,7 +294,7 @@ impl JudgeLine {
             }
             res.with_model(self.object.now_scale(Vector::default()), |res| {
                 res.apply_model(|res| match &self.kind {
-                    JudgeLineKind::Noise => {},
+                    JudgeLineKind::Noise => {}
                     JudgeLineKind::Normal => {
                         let mut color = color.unwrap_or(res.judge_line_color);
                         color.a *= alpha.max(0.0);
@@ -424,11 +453,12 @@ impl JudgeLine {
                     }
                     if let Some(note) = self.notes.get(note_id as usize) {
                         let tag = (id as u32, note_id);
+                        let flow = self.cache.fixed_preview_flow(note_id as usize, res.note_flow_speed);
                         if note.above {
-                            note.capture_replay_center(res, &mut config, tag);
+                            note.capture_replay_center(res, &mut config, tag, flow);
                         } else {
                             res.with_model(Matrix::identity().append_nonuniform_scaling(&Vector::new(1., -1.)), |res| {
-                                note.capture_replay_center(res, &mut config, tag);
+                                note.capture_replay_center(res, &mut config, tag, flow);
                             });
                         }
                     }
@@ -436,47 +466,46 @@ impl JudgeLine {
                 res.replay_note_targets = targets;
             }
             let (vw, vh) = (1.1, 1.);
-            let p = res.screen_points_to_world(res.chart_view_points([
-                Point::new(-vw, -vh),
-                Point::new(-vw, vh),
-                Point::new(vw, -vh),
-                Point::new(vw, vh),
-            ], true));
+            let p = res.screen_points_to_world(
+                res.chart_view_points([Point::new(-vw, -vh), Point::new(-vw, vh), Point::new(vw, -vh), Point::new(vw, vh)], true),
+            );
             let height_above = p[0].y.max(p[1].y.max(p[2].y.max(p[3].y))) * res.aspect_ratio;
             let height_below = -p[0].y.min(p[1].y.min(p[2].y.min(p[3].y))) * res.aspect_ratio;
-            let agg = res.config.aggressive;
+            let agg = res.config.aggressive && res.fixed_preview_chart_time.is_none();
             let note_flow_speed = res.note_flow_speed as f64;
-            for note in self.notes.iter().take(self.cache.not_plain_count).filter(|it| it.above) {
-                note.render(res, &mut config, bpm_list);
+            for (note_id, note) in self.notes.iter().take(self.cache.not_plain_count).enumerate().filter(|(_, it)| it.above) {
+                note.render(res, &mut config, bpm_list, self.cache.fixed_preview_plan(note_id, res.note_flow_speed));
             }
             for index in &self.cache.above_indices {
                 let speed = self.notes[*index].speed;
                 let limit = height_above as f64 / (speed * note_flow_speed);
-                for note in self.notes[*index..].iter() {
+                for (offset, note) in self.notes[*index..].iter().enumerate() {
                     if !note.above || speed != note.speed {
                         break;
                     }
                     if agg && note.height - config.line_height + note.object.translation.1.now() as f64 > limit {
                         break;
                     }
-                    note.render(res, &mut config, bpm_list);
+                    let note_id = *index + offset;
+                    note.render(res, &mut config, bpm_list, self.cache.fixed_preview_plan(note_id, res.note_flow_speed));
                 }
             }
             res.with_model(Matrix::identity().append_nonuniform_scaling(&Vector::new(1.0, -1.0)), |res| {
-                for note in self.notes.iter().take(self.cache.not_plain_count).filter(|it| !it.above) {
-                    note.render(res, &mut config, bpm_list);
+                for (note_id, note) in self.notes.iter().take(self.cache.not_plain_count).enumerate().filter(|(_, it)| !it.above) {
+                    note.render(res, &mut config, bpm_list, self.cache.fixed_preview_plan(note_id, res.note_flow_speed));
                 }
                 for index in &self.cache.below_indices {
                     let speed = self.notes[*index].speed;
                     let limit = height_below as f64 / (speed * note_flow_speed);
-                    for note in self.notes[*index..].iter() {
+                    for (offset, note) in self.notes[*index..].iter().enumerate() {
                         if speed != note.speed {
                             break;
                         }
                         if agg && note.height - config.line_height + note.object.translation.1.now() as f64 > limit {
                             break;
                         }
-                        note.render(res, &mut config, bpm_list);
+                        let note_id = *index + offset;
+                        note.render(res, &mut config, bpm_list, self.cache.fixed_preview_plan(note_id, res.note_flow_speed));
                     }
                 }
             });

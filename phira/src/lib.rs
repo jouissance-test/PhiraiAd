@@ -348,6 +348,19 @@ async fn the_main() -> Result<()> {
         }
         Ok(())
     });
+    let _ = prpr::fixed_preview::PREFERENCE_SAVER.set(|enabled, seconds| {
+        let old = (
+            get_data().config.fixed_preview_time_enabled,
+            get_data().config.fixed_preview_time,
+        );
+        get_data_mut().config.fixed_preview_time_enabled = enabled;
+        get_data_mut().config.fixed_preview_time = seconds;
+        if let Err(error) = save_data() {
+            (get_data_mut().config.fixed_preview_time_enabled, get_data_mut().config.fixed_preview_time) = old;
+            return Err(error);
+        }
+        Ok(())
+    });
     sync_data();
     save_data()?;
 

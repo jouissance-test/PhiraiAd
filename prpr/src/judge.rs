@@ -2271,6 +2271,7 @@ impl Judge {
             let line = &chart.lines[line_id];
             let note = &line.notes[id as usize];
             let line_tr = line.now_transform(res, &chart.lines);
+            let note_flow = line.cache.fixed_preview_flow(id as usize, res.note_flow_speed);
             let custom_offset = if res.config.judgement_mode == JudgementMode::Custom {
                 let scheme = res.config.effective_custom_judgement();
                 let offset = (note.time - diff.unwrap_or(t)) / spd * 1000.;
@@ -2353,11 +2354,12 @@ impl Judge {
                                     mat.append_nonuniform_scaling_mut(&Vector::new(1., -1.));
                                 }
                                 let incline_sin = line.incline.now_opt().map(|it| it.to_radians().sin()).unwrap_or_default();
-                                mat *= note.now_transform(
+                                mat *= note.now_transform_with_flow(
                                     res,
                                     &line.ctrl_obj.borrow_mut(),
                                     ((note.height - line.height.now() as f64) / res.aspect_ratio as f64 * note.speed) as f32,
                                     incline_sin,
+                                    note_flow,
                                 );
                                 mat
                             },

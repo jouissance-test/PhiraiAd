@@ -667,6 +667,15 @@ impl Slider {
 
 thread_local! {
     static STATE: RefCell<HashMap<String, Option<u64>>> = RefCell::new(HashMap::new());
+    static HOLD_REPEAT_STATE: RefCell<HashMap<String, HoldRepeatButton>> = RefCell::new(HashMap::new());
+}
+
+#[derive(Clone, Copy, Default)]
+struct HoldRepeatButton {
+    id: Option<u64>,
+    started_at: f64,
+    repeat: crate::practice_view::HoldRepeat,
+    repeated: bool,
 }
 
 pub struct InputParams<'a> {
@@ -921,6 +930,14 @@ impl<'a> Ui<'a> {
     }
 
     #[inline]
+    pub fn disabled<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let touches = self.touches.replace(Vec::new());
+        let res = self.alpha(0.35, f);
+        self.touches = touches;
+        res
+    }
+
+    #[inline]
     pub fn with<R>(&mut self, transform: Matrix, f: impl FnOnce(&mut Self) -> R) -> R {
         let old = self.transform;
         self.transform = old * transform;
@@ -1110,6 +1127,16 @@ impl<'a> Ui<'a> {
                     ..if *value { WHITE } else { self.background() }
                 },
             );
+            if *value {
+                let check_color = self.background();
+                self.text("✓")
+                    .pos(r.center().x, r.center().y)
+                    .anchor(0.5, 0.5)
+                    .size(0.38)
+                    .color(check_color)
+                    .no_baseline()
+                    .draw();
+            }
             let r = Rect::new(r.x, r.y, text.right() - r.x, (text.bottom() - r.y).max(w));
             if self.clicked(r, entry) {
                 *value ^= true;
@@ -1212,7 +1239,8 @@ impl<'a> Ui<'a> {
         })
     }
 
-    /// Practice slider: capture the initiating finger until release/cancellation, even across empty frames.
+    /// Practice slider: use 1x as the midpoint only when it is inside the range.
+    /// Capture the initiating finger until release/cancellation, even across empty frames.
     pub fn practice_speed_slider(
         &mut self,
         input_id: &str,
@@ -1228,7 +1256,7 @@ impl<'a> Ui<'a> {
             crate::practice_view::SliderSpec {
                 min: range.start,
                 max: range.end,
-                midpoint: 1.,
+                midpoint: if range.start < 1. && 1. < range.end { 1. } else { (range.start + range.end) * 0.5 },
                 step,
                 suffix: "",
             },
@@ -1248,6 +1276,9 @@ impl<'a> Ui<'a> {
         let text = text.into();
         let len = length.unwrap_or(0.46);
         let cy = 0.115;
+        // Use real monotonic elapsed time rather than chart/pause time so the
+        // Fixed Preview repeat continues while playback is paused and is not FPS-bound.
+        let now_real = crate::practice_view::uses_hold_repeat(input_id).then(get_time);
         STATE.with(|state| {
             let mut state = state.borrow_mut();
             let entry = state.entry(format!("{input_id}:drag")).or_default();
@@ -1285,7 +1316,7 @@ impl<'a> Ui<'a> {
             let number_text = if input_id.starts_with("exercise_view_") {
                 value.to_string()
             } else {
-                crate::practice_speed::display(*value)
+                crate::practice_speed::display_for_step(*value, spec.step)
             };
             self.text(format!("{}{}", number_text, spec.suffix))
                 .pos(number.center().x, number.center().y)
@@ -1315,7 +1346,55 @@ impl<'a> Ui<'a> {
                     .color(WHITE)
                     .no_baseline()
                     .draw();
-                if self.clicked(r, state.entry(format!("{input_id}:{suffix}")).or_default()) {
+                let button_id = format!("{input_id}:{suffix}");
+                if let Some(now_real) = now_real {
+                    let button_rect = self.rect_to_global(r);
+                    let mut clicked = false;
+                    HOLD_REPEAT_STATE.with(|states| {
+                        let mut states = states.borrow_mut();
+                        let button = states.entry(button_id.clone()).or_default();
+                        self.ensure_touches().retain(|touch| {
+                            let owned = button.id == Some(touch.id);
+                            match touch.phase {
+                                TouchPhase::Started if button.id.is_none() && button_rect.contains(touch.position) => {
+                                    button.id = Some(touch.id);
+                                    button.started_at = now_real;
+                                    button.repeat = crate::practice_view::HoldRepeat::default();
+                                    button.repeated = false;
+                                    false
+                                }
+                                TouchPhase::Moved | TouchPhase::Stationary if owned => {
+                                    if !button_rect.contains(touch.position) {
+                                        *button = HoldRepeatButton::default();
+                                    }
+                                    false
+                                }
+                                TouchPhase::Ended if owned => {
+                                    if crate::practice_view::release_steps(button.repeated) > 0 && button_rect.contains(touch.position) {
+                                        clicked = true;
+                                    }
+                                    *button = HoldRepeatButton::default();
+                                    false
+                                }
+                                TouchPhase::Cancelled if owned => {
+                                    *button = HoldRepeatButton::default();
+                                    false
+                                }
+                                _ => !button_rect.contains(touch.position),
+                            }
+                        });
+                        if button.id.is_some() {
+                            let count = button.repeat.advance(now_real - button.started_at);
+                            if count > 0 {
+                                button.repeated = true;
+                                *value = crate::practice_view::adjust_repeated_value(*value, delta, count, spec.min, spec.max);
+                            }
+                        }
+                    });
+                    if clicked {
+                        *value = crate::practice_view::adjust_repeated_value(*value, delta, crate::practice_view::release_steps(false), spec.min, spec.max);
+                    }
+                } else if self.clicked(r, state.entry(button_id).or_default()) {
                     *value = (*value + delta).clamp(spec.min, spec.max);
                 }
                 x += button_size + gap;
@@ -1335,10 +1414,18 @@ impl<'a> Ui<'a> {
                 "exercise_view_scale",
                 "exercise_view_x",
                 "exercise_view_y",
+                "fixed_preview_time",
             ] {
                 for suffix in ["", ":drag", ":-", ":+"] {
                     state.remove(&format!("{id}{suffix}"));
                 }
+            }
+        });
+        HOLD_REPEAT_STATE.with(|state| {
+            let mut state = state.borrow_mut();
+            for id in ["fixed_preview_time"] {
+                state.remove(&format!("{id}:-"));
+                state.remove(&format!("{id}:+"));
             }
         });
     }
@@ -1663,7 +1750,9 @@ mod resource_slider_tests {
         slider.pos = 0.6;
         slider
     }
-    fn touch(phase: TouchPhase, x: f32) -> Touch { Touch { id: 123, phase, position: vec2(x, 0.12) } }
+    fn touch(phase: TouchPhase, x: f32) -> Touch {
+        Touch { id: 123, phase, position: vec2(x, 0.12), time: 0. }
+    }
     #[test]
     fn crossing_threshold_preserves_value_then_moves_relatively() {
         let mut slider = slider(); let mut value = 50.25;

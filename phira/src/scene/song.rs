@@ -1409,8 +1409,15 @@ impl SongScene {
                 .max_width(width - 0.06)
                 .draw();
             let flow_speed = get_data().config.global_note_flow_speed();
-            self.note_flow_slider
-                .render(ui, Rect::new(width - 0.28, 0.10, 0.23, 0.09), rt, flow_speed, format!("{flow_speed:.2}×"));
+            if get_data().config.fixed_preview_time_enabled {
+                ui.alpha(0.35, |ui| {
+                    self.note_flow_slider
+                        .render(ui, Rect::new(width - 0.28, 0.10, 0.23, 0.09), rt, flow_speed, format!("{flow_speed:.2}×"));
+                });
+            } else {
+                self.note_flow_slider
+                    .render(ui, Rect::new(width - 0.28, 0.10, 0.23, 0.09), rt, flow_speed, format!("{flow_speed:.2}×"));
+            }
             dy!(0.23);
             let rh = ITEM_HEIGHT * 3. / 5.;
             let rr = Rect::new(width - 0.24, (ITEM_HEIGHT - rh) / 2., 0.2, rh);
@@ -1892,11 +1899,13 @@ impl Scene for SongScene {
                             return Ok(true);
                         }
                         let rt = tm.real_time() as _;
-                        if let Some(changed) = self.note_flow_slider.touch(touch, rt, &mut get_data_mut().config.note_flow_speed) {
-                            if changed {
-                                save_data()?;
+                        if !get_data().config.fixed_preview_time_enabled {
+                            if let Some(changed) = self.note_flow_slider.touch(touch, rt, &mut get_data_mut().config.note_flow_speed) {
+                                if changed {
+                                    save_data()?;
+                                }
+                                return Ok(true);
                             }
-                            return Ok(true);
                         }
                         if let Some(mode) = self.note_conversion_mods.touch(touch, rt, self.chart_play_settings.note_conversion) {
                             let mut settings = self.chart_play_settings.clone();

@@ -12,6 +12,30 @@ pub fn timeline_position(screen_height: f32, viewport_width: f32) -> f32 {
     0.06 + screen_height * 0.2 / viewport_width.max(1.)
 }
 
+/// Pause-menu origin and horizontal footprint of the Fixed Preview controls.
+pub const FIXED_PREVIEW_PANEL_LOCAL_LEFT: f32 = -0.025;
+pub const FIXED_PREVIEW_PANEL_LOCAL_RIGHT: f32 = 0.645;
+pub const FIXED_PREVIEW_PANEL_LOCAL_BOTTOM: f32 = 0.247;
+
+pub fn fixed_preview_panel_origin(exercise: bool) -> (f32, f32) {
+    (if exercise { -0.95 } else { -0.55 }, if exercise { 0.28 } else { 0.18 })
+}
+
+pub fn fixed_preview_panel_scale(exercise: bool) -> f32 {
+    if exercise { 0.65 } else { 1. }
+}
+
+pub fn fixed_preview_panel_horizontal_bounds(exercise: bool) -> (f32, f32) {
+    let x = fixed_preview_panel_origin(exercise).0;
+    let scale = fixed_preview_panel_scale(exercise);
+    (x + FIXED_PREVIEW_PANEL_LOCAL_LEFT * scale, x + FIXED_PREVIEW_PANEL_LOCAL_RIGHT * scale)
+}
+
+pub fn fixed_preview_panel_vertical_bounds(exercise: bool) -> (f32, f32) {
+    let y = fixed_preview_panel_origin(exercise).1;
+    (y, y + FIXED_PREVIEW_PANEL_LOCAL_BOTTOM * fixed_preview_panel_scale(exercise))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PracticeView {
     pub scale_percent: f32,
@@ -77,6 +101,48 @@ pub struct SliderSpec {
     pub midpoint: f32,
     pub step: f32,
     pub suffix: &'static str,
+}
+
+/// Frame-rate-independent repeat timing for the +/- buttons on practice sliders.
+/// The first repeat happens after a short hold; subsequent repeats accelerate
+/// smoothly, from about seven to twenty-two steps per second.
+#[derive(Clone, Copy, Debug)]
+pub struct HoldRepeat {
+    next_repeat_at: f64,
+}
+
+impl Default for HoldRepeat {
+    fn default() -> Self {
+        Self { next_repeat_at: 0.35 }
+    }
+}
+
+impl HoldRepeat {
+    pub fn advance(&mut self, held_seconds: f64) -> u32 {
+        if !held_seconds.is_finite() || held_seconds < 0. {
+            return 0;
+        }
+        let mut repeats = 0;
+        while held_seconds >= self.next_repeat_at {
+            repeats += 1;
+            let acceleration = ((self.next_repeat_at - 0.35) / 2.0).clamp(0., 1.);
+            let interval = 0.14 - (0.14 - 0.045) * acceleration;
+            self.next_repeat_at += interval;
+        }
+        repeats
+    }
+}
+
+pub fn release_steps(repeated: bool) -> u32 {
+    if repeated { 0 } else { 1 }
+}
+
+pub fn uses_hold_repeat(input_id: &str) -> bool {
+    input_id == "fixed_preview_time"
+}
+
+pub fn adjust_repeated_value(value: f32, delta: f32, count: u32, min: f32, max: f32) -> f32 {
+    (value + delta * count as f32).clamp(min, max)
 }
 
 pub const SCALE: SliderSpec = SliderSpec {
@@ -148,6 +214,33 @@ mod tests {
         }
         assert_eq!(SCALE.drag_value(0.25), 53.);
         assert_eq!(SCALE.drag_value(0.75), 300.);
+    }
+
+    #[test]
+    fn hold_repeat_waits_then_accelerates_and_stops_at_release_boundary() {
+        let mut repeat = HoldRepeat::default();
+        assert_eq!(repeat.advance(0.20), 0);
+        assert_eq!(repeat.advance(0.349), 0);
+        assert_eq!(repeat.advance(0.35), 1);
+        let early = repeat.advance(0.75);
+        assert_eq!(early, 2);
+        let mut accelerated = HoldRepeat::default();
+        accelerated.advance(1.5);
+        let later = accelerated.advance(1.9);
+        assert!(later > early);
+        // A released control no longer calls advance; a fresh press starts with a fresh delay.
+        let mut after_release = HoldRepeat::default();
+        assert_eq!(after_release.advance(0.10), 0);
+        assert_eq!(release_steps(false), 1);
+        assert_eq!(release_steps(true), 0);
+        assert!(uses_hold_repeat("fixed_preview_time"));
+        assert!(!uses_hold_repeat("exercise_speed"));
+    }
+
+    #[test]
+    fn repeated_value_clamps_at_both_limits() {
+        assert_eq!(adjust_repeated_value(0.101, -0.001, 20, 0.1, 0.75), 0.1);
+        assert_eq!(adjust_repeated_value(0.749, 0.001, 20, 0.1, 0.75), 0.75);
     }
 
     #[test]

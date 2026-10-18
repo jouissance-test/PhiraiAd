@@ -195,28 +195,32 @@ impl Note {
     }
 
     pub fn now_transform(&self, res: &Resource, ctrl_obj: &CtrlObject, base: f32, incline_sin: f32) -> Matrix {
-        let base = base * res.note_flow_speed;
-        let incline_val = 1. - incline_sin * (base * res.aspect_ratio + self.object.translation.1.now()) * RPE_HEIGHT / 2. / 360.;
-        let mut tr = self.object.now_translation(res);
-        tr.x *= if matches!(self.kind, NoteKind::Hold { .. }) {
-            1.
-        } else {
-            incline_val * ctrl_obj.pos.now_opt().unwrap_or(1.)
-        };
-        tr.y += base;
-        let mut scale = self.object.scale.now_with_def(1.0, 1.0);
-        scale.x *= ctrl_obj.size.now_opt().unwrap_or(1.0);
-        if res.info.note_uniform_scale {
-            scale.y *= ctrl_obj.size.now_opt().unwrap_or(1.0);
-        } else {
-            scale.y = 1.0;
-        };
-        self.object.now_rotation().append_nonuniform_scaling(&scale).append_translation(&tr)
+        self.now_transform_with_flow(res, ctrl_obj, base, incline_sin, res.note_flow_speed)
+    }
+
+    pub fn now_transform_with_flow(&self, res: &Resource, ctrl_obj: &CtrlObject, base: f32, incline_sin: f32, flow: f32) -> Matrix {
+        crate::note_visual::NoteTransform {
+            translation: self.object.now_translation(res),
+            scale: self.object.scale.now_with_def(1., 1.),
+            rotation: self.object.rotation.now(),
+            y_offset: self.object.translation.1.now(),
+            ctrl_size: ctrl_obj.size.now_opt().unwrap_or(1.),
+            ctrl_pos: ctrl_obj.pos.now_opt().unwrap_or(1.),
+            uniform_scale: res.info.note_uniform_scale,
+            hold: matches!(self.kind, NoteKind::Hold { .. }),
+            incline_sin,
+            aspect_ratio: res.aspect_ratio,
+        }
+        .matrix(base, flow)
     }
 
     /// Submit a render-only kind; judgement, reports and the chart keep self.kind.
     /// The drawing implementation below is the r14 renderer with a kind input.
-    pub fn render(&self, res: &mut Resource, config: &mut RenderConfig, bpm_list: &mut BpmList) {
+    pub fn render(&self, res: &mut Resource, config: &mut RenderConfig, bpm_list: &mut BpmList, plan: crate::fixed_preview_policy::PreviewPlan) {
+        if plan.hides(self.fake, res.time) {
+            return;
+        }
+        let flow = plan.flow();
         let kind = if res.config.shorten_holds && !self.fake {
             if let NoteKind::Hold { end_time, .. } = self.kind {
                 let end_time = self.visual_end_time(res, end_time);
@@ -226,8 +230,7 @@ impl Note {
                     config.height_curve.value_at(end_time).unwrap_or(self.height as f32) as f64
                 };
                 self.init_ctrl_obj(config.ctrl_obj, config.line_height);
-                let drawing_scale =
-                    self.speed * config.ctrl_obj.y.now_opt().unwrap_or(1.) as f64 / res.aspect_ratio as f64 * res.note_flow_speed as f64;
+                let drawing_scale = self.speed * config.ctrl_obj.y.now_opt().unwrap_or(1.) as f64 / res.aspect_ratio as f64 * flow as f64;
                 let end_height = crate::chart_play::hold_render_end_height(self.height, sampled_height, drawing_scale);
                 NoteKind::Hold { end_time, end_height }
             } else {
@@ -236,10 +239,10 @@ impl Note {
         } else {
             self.kind.clone()
         };
-        self.render_with_kind(kind, res, config, bpm_list);
+        self.render_with_kind(kind, res, config, bpm_list, flow);
     }
 
-    pub(crate) fn capture_replay_center(&self, res: &mut Resource, config: &mut RenderConfig, tag: (u32, u32)) {
+    pub(crate) fn capture_replay_center(&self, res: &mut Resource, config: &mut RenderConfig, tag: (u32, u32), flow: f32) {
         // Sample the same transforms used by drawing, even on the hit frame
         // after judgement has hidden the sprite. Store viewport-normalized NDC.
         {
@@ -260,13 +263,13 @@ impl Note {
                     };
                 let r = style.hold_head_rect();
                 let half_height = r.h / r.w * scale * style.hold_ratio();
-                let bottom = if self.time <= res.time { 0. } else { base as f32 * res.note_flow_speed };
+                let bottom = if self.time <= res.time { 0. } else { base as f32 * flow };
                 (
                     self.now_transform(res, config.ctrl_obj, 0., 0.),
                     Point::new(0., bottom - if res.res_pack.info.hold_compact { 0. } else { half_height }),
                 )
             } else {
-                (self.now_transform(res, config.ctrl_obj, base as f32, config.incline_sin), Point::default())
+                (self.now_transform_with_flow(res, config.ctrl_obj, base as f32, config.incline_sin, flow), Point::default())
             };
             let p = res.world_to_screen(transform.transform_point(&local));
             // Chart::render applies this reflection in the GL model stack.
@@ -284,7 +287,7 @@ impl Note {
         }
     }
 
-    fn render_with_kind(&self, kind: NoteKind, res: &mut Resource, config: &mut RenderConfig, bpm_list: &mut BpmList) {
+    fn render_with_kind(&self, kind: NoteKind, res: &mut Resource, config: &mut RenderConfig, bpm_list: &mut BpmList, flow: f32) {
         if matches!(self.judge, JudgeStatus::Judged) && !matches!(kind, NoteKind::Hold { .. }) {
             return;
         }
@@ -328,7 +331,7 @@ impl Note {
 
         if !config.draw_below
             && (((res.time - FADEOUT_TIME >= self.time || self.fake && res.time >= self.time) && !matches!(kind, NoteKind::Hold { .. }))
-                || (self.time > res.time && cover_base <= -0.001))
+                || crate::note_visual::covered_before_hit(config.draw_below, res.time, self.time, cover_base))
         {
             return;
         }
@@ -352,7 +355,7 @@ impl Note {
                 color.a *= if self.fake && res.time >= self.time { 0. } else { alpha as f32 };
             }
             color.a *= mod_alpha as f32;
-            res.with_model(self.now_transform(res, ctrl_obj, base as f32, config.incline_sin), |res| {
+            res.with_model(self.now_transform_with_flow(res, ctrl_obj, base as f32, config.incline_sin, flow), |res| {
                 draw_center(res, tex, order, scale, color);
             });
         };
@@ -378,7 +381,7 @@ impl Note {
                     color.a *= mod_alpha as f32;
 
                     let h = if self.time <= res.time { line_height } else { height };
-                    let flow = res.note_flow_speed as f64;
+                    let flow = flow as f64;
                     let bottom = ((h - line_height) * flow) as f32;
                     let top = ((end_height - line_height) * flow) as f32;
                     let tex = &style.hold;
