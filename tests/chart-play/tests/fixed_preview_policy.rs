@@ -38,6 +38,7 @@ fn every_original_fallback_is_ungated_even_when_fixed_preview_is_enabled() {
         FallbackReason::NoBracket,
         FallbackReason::VisibilityGap,
         FallbackReason::MotionSpike,
+        FallbackReason::AuthoredVisibility,
     ] {
         let plan = PreviewPlan::original(0.7, reason);
         assert_eq!(plan.flow(), 0.7);

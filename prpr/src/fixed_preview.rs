@@ -118,6 +118,15 @@ const MAX_VALIDATION_STEPS: usize = 1536;
 // flow between the known-safe minimum and failed upper candidate. This remains
 // a single constant-flow plan, not a multi-segment dynamic-flow search.
 const CONSTANT_FLOW_REFINEMENT_STEPS: usize = 10;
+// When endpoint bracketing misses a target-visible flow island, probe only the
+// target cheaply, then run the expensive full-interval validator for at most
+// three representatives of the highest-flow island.
+const TARGET_FLOW_PROBE_STEPS: usize = 64;
+const TARGET_FLOW_EDGE_REFINEMENT_STEPS: usize = 12;
+// If the boundary and minimum fail for complementary reasons, a narrow safe
+// constant band may exist between them. Keep the expensive interval search
+// strictly bounded; every probe still runs the full validator.
+const INTERIOR_FLOW_PROBE_COUNT: usize = 8;
 // A Constant plan may inherit fast authored line motion, but must not add a
 // materially faster semantic-head spike than the Original trajectory. The
 // absolute floor still rejects a newly introduced spike when Original barely
@@ -129,6 +138,7 @@ const CONSTANT_MOTION_ORIGINAL_TOLERANCE_NDC_PER_REAL_SECOND: f64 = 1.;
 struct PreviewSample {
     anchor: Point,
     visible: bool,
+    authored_visible: bool,
 }
 
 fn validation_steps(start: f64, hit: f64, playback_rate: f64) -> Option<usize> {
@@ -162,32 +172,120 @@ fn validate_constant_candidate(
     original_flow: f32,
     sample: &mut impl FnMut(f64, f32) -> Option<PreviewSample>,
 ) -> Result<(), FallbackReason> {
-    let mut previous: Option<(f64, Point, Point)> = None;
+    let Some(target_sample) = sample(start, flow) else {
+        return Err(FallbackReason::VisibilityGap);
+    };
+    if !target_sample.authored_visible {
+        return Err(FallbackReason::AuthoredVisibility);
+    }
+    let mut previous: Option<(f64, Point, Point, bool)> = None;
     let mut failure = FallbackReason::VisibilityGap;
     let accepted = visible_interval(start, hit, steps, |time| {
         let Some(candidate_sample) = sample(time, flow) else { return false };
+        let Some(original_sample) = sample(time, original_flow) else { return false };
+        // Preserve renderer-authored gaps, but never let a changed flow create
+        // a new gap that Original did not have. Geometry and perceived motion
+        // do not matter while both plans are intentionally invisible; reset
+        // the motion segment so a later authored reappearance is not measured
+        // as one giant visible jump across the hidden interval.
+        if !candidate_sample.authored_visible {
+            if original_sample.authored_visible {
+                return false;
+            }
+            previous = None;
+            return true;
+        }
         if !candidate_sample.visible {
             return false;
         }
         let anchor = candidate_sample.anchor;
-        let Some(original_anchor) = sample(time, original_flow).map(|sample| sample.anchor) else {
-            return false;
-        };
-        if let Some((previous_time, previous_anchor, previous_original_anchor)) = previous {
+        let original_anchor = original_sample.anchor;
+        let original_motion_visible = original_sample.authored_visible && original_sample.visible;
+        if let Some((previous_time, previous_anchor, previous_original_anchor, previous_original_motion_visible)) = previous {
             let real_dt = (time - previous_time) / playback_rate;
             let speed = (anchor - previous_anchor).norm() as f64 / real_dt;
             let original_speed = (original_anchor - previous_original_anchor).norm() as f64 / real_dt;
-            let motion_speed_limit =
-                CONSTANT_MOTION_ABSOLUTE_LIMIT_NDC_PER_REAL_SECOND.max(original_speed + CONSTANT_MOTION_ORIGINAL_TOLERANCE_NDC_PER_REAL_SECOND);
-            if !speed.is_finite() || !original_speed.is_finite() || speed > motion_speed_limit {
+            // Only borrow Original's motion allowance while Original itself is
+            // visibly traversing the viewport. Otherwise a Constant plan could
+            // expose a fast authored jump that Original kept off-screen.
+            let borrow_original_motion = previous_original_motion_visible && original_motion_visible;
+            let motion_speed_limit = if borrow_original_motion {
+                CONSTANT_MOTION_ABSOLUTE_LIMIT_NDC_PER_REAL_SECOND
+                    .max(original_speed + CONSTANT_MOTION_ORIGINAL_TOLERANCE_NDC_PER_REAL_SECOND)
+            } else {
+                CONSTANT_MOTION_ABSOLUTE_LIMIT_NDC_PER_REAL_SECOND
+            };
+            if !speed.is_finite() || borrow_original_motion && !original_speed.is_finite() || speed > motion_speed_limit {
                 failure = FallbackReason::MotionSpike;
                 return false;
             }
         }
-        previous = Some((time, anchor, original_anchor));
+        previous = Some((time, anchor, original_anchor, original_motion_visible));
         true
     });
     accepted.then_some(()).ok_or(failure)
+}
+
+fn combined_candidate_failure(boundary: FallbackReason, minimum: FallbackReason) -> FallbackReason {
+    if boundary == FallbackReason::AuthoredVisibility && minimum == FallbackReason::AuthoredVisibility {
+        FallbackReason::AuthoredVisibility
+    } else if boundary == FallbackReason::MotionSpike || minimum == FallbackReason::MotionSpike {
+        FallbackReason::MotionSpike
+    } else {
+        FallbackReason::VisibilityGap
+    }
+}
+
+fn internal_target_flow_candidates(
+    mut visible: impl FnMut(f32) -> bool,
+    min: f32,
+    max: f32,
+) -> [Option<f32>; 3] {
+    if !min.is_finite() || !max.is_finite() || min <= 0. || max <= min {
+        return [None; 3];
+    }
+    let flow_at = |index: usize| min + (max - min) * index as f32 / TARGET_FLOW_PROBE_STEPS as f32;
+    let mut current_start = None;
+    let mut highest_island = None;
+    for index in 0..=TARGET_FLOW_PROBE_STEPS {
+        if visible(flow_at(index)) {
+            current_start.get_or_insert(index);
+        } else if let Some(start) = current_start.take() {
+            highest_island = Some((start, index - 1));
+        }
+    }
+    if let Some(start) = current_start {
+        highest_island = Some((start, TARGET_FLOW_PROBE_STEPS));
+    }
+    let Some((start_index, end_index)) = highest_island else {
+        return [None; 3];
+    };
+    let left = flow_at(start_index);
+    let mut right = flow_at(end_index);
+    if end_index < TARGET_FLOW_PROBE_STEPS {
+        let mut outside = flow_at(end_index + 1);
+        for _ in 0..TARGET_FLOW_EDGE_REFINEMENT_STEPS {
+            let middle = (right + outside) * 0.5;
+            if visible(middle) {
+                right = middle;
+            } else {
+                outside = middle;
+            }
+        }
+    }
+    let middle = (left + right) * 0.5;
+    let mut candidates = [Some(right), Some(middle), Some(left)];
+    for index in 0..candidates.len() {
+        let Some(candidate) = candidates[index] else { continue };
+        if candidates[..index]
+            .iter()
+            .flatten()
+            .any(|previous| (candidate - *previous).abs() <= 1e-5)
+        {
+            candidates[index] = None;
+        }
+    }
+    candidates
 }
 
 fn choose_plan(
@@ -208,13 +306,72 @@ fn choose_plan(
     let Some(steps) = validation_steps(start, hit, playback_rate) else {
         return original(FallbackReason::ValidationBudget);
     };
+    // A fixed-preview gate may only open where the authored renderer would
+    // actually draw the Note. If Original is hidden, skip GateOnly but still
+    // allow a Constant candidate whose own flow changes shortened-Hold cover.
+    let original_authored_visible = sample(start, original_flow).is_some_and(|sample| sample.authored_visible);
     // Preserve authored motion whenever gating alone already supplies a full
     // readable interval. Do not accelerate a reversing trajectory needlessly.
-    if visible_interval(start, hit, steps, |time| sample(time, original_flow).is_some_and(|sample| sample.visible)) {
+    if original_authored_visible
+        && visible_interval(start, hit, steps, |time| {
+            sample(time, original_flow).is_some_and(|sample| !sample.authored_visible || sample.visible)
+        })
+    {
         return PreviewPlan::GateOnly { original_flow, start };
     }
     let Some(flow) = solve_flow(|flow| sample(start, flow).is_some_and(|sample| sample.visible), NOTE_FLOW_SPEED_MIN, NOTE_FLOW_SPEED_MAX) else {
-        return original(FallbackReason::NoBracket);
+        let minimum_failure = match validate_constant_candidate(
+            start,
+            hit,
+            steps,
+            playback_rate,
+            NOTE_FLOW_SPEED_MIN,
+            original_flow,
+            &mut sample,
+        ) {
+            Ok(()) => {
+                // Target geometry may remain in the viewport for the whole
+                // flow range, so no boundary bracket exists even though the
+                // Original interval later leaves it. Search only up to the
+                // known-failing Original flow. This also preserves the special
+                // case where a slower candidate opens a flow-dependent cover.
+                let (mut low, mut high) = (NOTE_FLOW_SPEED_MIN, original_flow.clamp(NOTE_FLOW_SPEED_MIN, NOTE_FLOW_SPEED_MAX));
+                for _ in 0..CONSTANT_FLOW_REFINEMENT_STEPS {
+                    let middle = (low + high) * 0.5;
+                    if validate_constant_candidate(start, hit, steps, playback_rate, middle, original_flow, &mut sample).is_ok() {
+                        low = middle;
+                    } else {
+                        high = middle;
+                    }
+                }
+                return PreviewPlan::Constant { flow: low, start };
+            }
+            Err(reason) => reason,
+        };
+        let candidates = internal_target_flow_candidates(
+            |flow| sample(start, flow).is_some_and(|sample| sample.visible && sample.authored_visible),
+            NOTE_FLOW_SPEED_MIN,
+            NOTE_FLOW_SPEED_MAX,
+        );
+        let mut attempted = false;
+        let mut failure = minimum_failure;
+        for candidate in candidates.into_iter().flatten() {
+            if (candidate - NOTE_FLOW_SPEED_MIN).abs() <= 1e-5 {
+                continue;
+            }
+            attempted = true;
+            match validate_constant_candidate(start, hit, steps, playback_rate, candidate, original_flow, &mut sample) {
+                Ok(()) => return PreviewPlan::Constant { flow: candidate, start },
+                Err(reason) => failure = combined_candidate_failure(failure, reason),
+            }
+        }
+        return if attempted {
+            original(failure)
+        } else if minimum_failure == FallbackReason::AuthoredVisibility && !original_authored_visible {
+            original(FallbackReason::AuthoredVisibility)
+        } else {
+            original(FallbackReason::NoBracket)
+        };
     };
     let boundary_failure = match validate_constant_candidate(start, hit, steps, playback_rate, flow, original_flow, &mut sample) {
         Ok(()) => return PreviewPlan::Constant { flow, start },
@@ -235,11 +392,21 @@ fn choose_plan(
         }
         Err(reason) => reason,
     };
-    original(if boundary_failure == FallbackReason::MotionSpike || minimum_failure == FallbackReason::MotionSpike {
-        FallbackReason::MotionSpike
-    } else {
-        FallbackReason::VisibilityGap
-    })
+    let complementary_failures = matches!(
+        (boundary_failure, minimum_failure),
+        (FallbackReason::MotionSpike, FallbackReason::VisibilityGap)
+            | (FallbackReason::VisibilityGap, FallbackReason::MotionSpike)
+    );
+    if complementary_failures {
+        for index in (1..=INTERIOR_FLOW_PROBE_COUNT).rev() {
+            let candidate = NOTE_FLOW_SPEED_MIN
+                + (flow - NOTE_FLOW_SPEED_MIN) * index as f32 / (INTERIOR_FLOW_PROBE_COUNT + 1) as f32;
+            if validate_constant_candidate(start, hit, steps, playback_rate, candidate, original_flow, &mut sample).is_ok() {
+                return PreviewPlan::Constant { flow: candidate, start };
+            }
+        }
+    }
+    original(combined_candidate_failure(boundary_failure, minimum_failure))
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -441,11 +608,9 @@ fn note_geometry_at_diagnostic(
             (geometry.matrix(base, flow), [local_rect(-half_width, -half_height, half_width, half_height); 3], Point::origin())
         }
     };
-    // Alpha, negative-alpha appearance modes and cover are renderer-owned
-    // visibility gates, not geometry. They remain authored exactly as-is, but
-    // must not make an otherwise safe travel trajectory fall back to original
-    // speed. The solver only answers whether the transformed quads stay in the
-    // viewport after their target boundary contact.
+    // Authored alpha, appearance and cover rules remain separate from travel
+    // geometry. The planner checks them at the requested target, while this
+    // sampler answers only whether transformed quads stay in the viewport.
     let (flip_x, flip_y) = crate::chart_play::reflection_axes(res.config.flip_x(), false);
     let mut transform =
         Matrix::identity().append_nonuniform_scaling(&Vector::new(flip_x, -flip_y)) * line_transform_at(chart, line_id, time, res.aspect_ratio);
@@ -492,6 +657,7 @@ fn audit_constant_candidate(
     hit: f64,
     playback_rate: f64,
     flow: f32,
+    original_flow: f32,
 ) -> serde_json::Value {
     let Some(steps) = validation_steps(start, hit, playback_rate) else {
         return serde_json::json!({"flow":flow,"validation_budget":false});
@@ -501,9 +667,14 @@ fn audit_constant_candidate(
     let mut outside_viewport = 0_usize;
     let mut visible = 0_usize;
     let mut motion_spike = 0_usize;
-    let mut previous: Option<(f64, Point)> = None;
+    let mut original_geometry_missing = 0_usize;
+    let mut authored_hidden_both = 0_usize;
+    let mut introduced_authored_hidden = 0_usize;
+    let mut previous: Option<(f64, Point, Point, bool)> = None;
     let mut geometric_previous: Option<(f64, Point)> = None;
     let mut visible_peak_speed = 0_f64;
+    let mut original_visible_peak_speed = 0_f64;
+    let mut production_motion_limit_peak = 0_f64;
     let mut geometric_peak_speed = 0_f64;
     for i in 0..=steps {
         let time = if i == steps {
@@ -528,23 +699,57 @@ fn audit_constant_candidate(
             }
         }
         geometric_previous = Some((time, geometry.anchor));
+        let original_geometry = match note_geometry_at_diagnostic(chart, line_id, note_id, res, time, original_flow) {
+            Ok(geometry) => geometry,
+            Err(_) => {
+                original_geometry_missing += 1;
+                previous = None;
+                continue;
+            }
+        };
+        let candidate_authored_hidden = authored_visibility_gate_at(chart, line_id, note_id, res, time, flow).is_some();
+        let original_authored_hidden = authored_visibility_gate_at(chart, line_id, note_id, res, time, original_flow).is_some();
+        if candidate_authored_hidden {
+            if original_authored_hidden {
+                authored_hidden_both += 1;
+            } else {
+                introduced_authored_hidden += 1;
+            }
+            previous = None;
+            continue;
+        }
         if !geometry_visible(geometry.quads) {
             outside_viewport += 1;
             previous = None;
             continue;
         }
         visible += 1;
-        if let Some((previous_time, previous_anchor)) = previous {
+        let original_motion_visible = !original_authored_hidden && geometry_visible(original_geometry.quads);
+        if let Some((previous_time, previous_anchor, previous_original_anchor, previous_original_motion_visible)) = previous {
             let real_dt = (time - previous_time) / playback_rate;
             let speed = (geometry.anchor - previous_anchor).norm() as f64 / real_dt;
+            let original_speed = (original_geometry.anchor - previous_original_anchor).norm() as f64 / real_dt;
+            let borrow_original_motion = previous_original_motion_visible && original_motion_visible;
+            let motion_limit = if borrow_original_motion {
+                CONSTANT_MOTION_ABSOLUTE_LIMIT_NDC_PER_REAL_SECOND
+                    .max(original_speed + CONSTANT_MOTION_ORIGINAL_TOLERANCE_NDC_PER_REAL_SECOND)
+            } else {
+                CONSTANT_MOTION_ABSOLUTE_LIMIT_NDC_PER_REAL_SECOND
+            };
             if speed.is_finite() {
                 visible_peak_speed = visible_peak_speed.max(speed);
             }
-            if !speed.is_finite() || speed > CONSTANT_MOTION_ABSOLUTE_LIMIT_NDC_PER_REAL_SECOND {
+            if borrow_original_motion && original_speed.is_finite() {
+                original_visible_peak_speed = original_visible_peak_speed.max(original_speed);
+            }
+            if motion_limit.is_finite() {
+                production_motion_limit_peak = production_motion_limit_peak.max(motion_limit);
+            }
+            if !speed.is_finite() || borrow_original_motion && !original_speed.is_finite() || speed > motion_limit {
                 motion_spike += 1;
             }
         }
-        previous = Some((time, geometry.anchor));
+        previous = Some((time, geometry.anchor, original_geometry.anchor, original_motion_visible));
     }
     serde_json::json!({
         "flow":flow,
@@ -552,25 +757,51 @@ fn audit_constant_candidate(
         "samples":steps+1,
         "geometry_missing":geometry_missing,
         "geometry_missing_reasons":geometry_missing_reasons,
+        "original_geometry_missing":original_geometry_missing,
         "outside_viewport":outside_viewport,
         "visible":visible,
+        "authored_hidden_both":authored_hidden_both,
+        "introduced_authored_hidden":introduced_authored_hidden,
         "motion_spike":motion_spike,
         "visible_peak_speed_ndc_per_real_second":visible_peak_speed,
+        "original_visible_peak_speed_ndc_per_real_second":original_visible_peak_speed,
+        "production_motion_limit_peak_ndc_per_real_second":production_motion_limit_peak,
         "geometric_peak_speed_ndc_per_real_second":geometric_peak_speed,
     })
 }
 
-#[cfg(feature = "render-audit")]
-fn authored_alpha_gate_at(chart: &Chart, line_id: usize, note_id: usize, time: f64) -> Option<&'static str> {
+fn authored_visibility_gate_at(
+    chart: &Chart,
+    line_id: usize,
+    note_id: usize,
+    res: &Resource,
+    time: f64,
+    flow: f32,
+) -> Option<&'static str> {
     let line = &chart.lines[line_id];
     let note = &line.notes[note_id];
     let line_alpha = sample(&line.object.alpha, time, 1.);
+    let mut draw_below = line.show_below;
+    let mut appear_before = f64::INFINITY;
     if line_alpha < 0. {
         if !chart.settings.pe_alpha_extension {
             return Some("negative_line_alpha_disabled");
         }
-        if (-line_alpha).floor() as u32 == 1 {
-            return Some("negative_line_alpha_hidden");
+        match (-line_alpha).floor() as u32 {
+            1 => return Some("negative_line_alpha_hidden"),
+            2 => draw_below = false,
+            value if (100..1000).contains(&value) => appear_before = (value as f64 - 100.) / 10.,
+            _ => {}
+        }
+    }
+    if appear_before.is_finite() {
+        let appearance_time = {
+            let mut bpm_list = chart.bpm_list.borrow_mut();
+            let hit_beat = bpm_list.beat(note.time);
+            bpm_list.time_beats(hit_beat - appear_before)
+        };
+        if appearance_time > time {
+            return Some("appearance_window");
         }
     }
     if sample(&note.object.alpha, time, 1.) <= 0. {
@@ -582,11 +813,48 @@ fn authored_alpha_gate_at(chart: &Chart, line_id: usize, note_id: usize, time: f
     let line_height = sample(&line.height, time, 0.) as f64;
     let y_offset = sample(&note.object.translation.1, time, 0.);
     let ctrl_height = (note.height - line_height + y_offset as f64 / note.speed) * RPE_HEIGHT as f64 / 2.;
-    (sample(&line.ctrl_obj.borrow().alpha, ctrl_height, 1.) <= 0.).then_some("control_alpha")
+    let ctrl = line.ctrl_obj.borrow();
+    if sample(&ctrl.alpha, ctrl_height, 1.) <= 0. {
+        return Some("control_alpha");
+    }
+    let speed = note.speed * sample(&ctrl.y, ctrl_height, 1.) as f64;
+    let cover_height = if chart.settings.hold_partial_cover {
+        match &note.kind {
+            NoteKind::Hold { end_time, end_height } if res.config.shorten_holds && !note.fake => {
+                let visual_end = crate::chart_play::hold_visual_end(
+                    note.time,
+                    *end_time,
+                    res.config.speed as f64,
+                    crate::judge::hold_tail_window(&res.config),
+                );
+                let sampled_height = if visual_end <= note.time {
+                    note.height
+                } else {
+                    sample(&line.height, visual_end, note.height as f32) as f64
+                };
+                crate::chart_play::hold_render_end_height(note.height, sampled_height, speed / res.aspect_ratio as f64 * flow as f64)
+            }
+            NoteKind::Hold { end_height, .. } => *end_height,
+            _ => note.height,
+        }
+    } else {
+        note.height
+    };
+    let cover_base = (cover_height - line_height) / res.aspect_ratio as f64 * speed;
+    crate::note_visual::covered_before_hit(draw_below, time, note.time, cover_base).then_some("cover")
 }
 
 #[cfg(feature = "render-audit")]
-fn audit_authored_visibility(chart: &Chart, line_id: usize, note_id: usize, start: f64, hit: f64, playback_rate: f64) -> serde_json::Value {
+fn audit_authored_visibility(
+    chart: &Chart,
+    line_id: usize,
+    note_id: usize,
+    res: &Resource,
+    start: f64,
+    hit: f64,
+    playback_rate: f64,
+    flow: f32,
+) -> serde_json::Value {
     let Some(steps) = validation_steps(start, hit, playback_rate) else {
         return serde_json::json!({"validation_budget":false});
     };
@@ -601,7 +869,7 @@ fn audit_authored_visibility(chart: &Chart, line_id: usize, note_id: usize, star
         } else {
             start + (hit - start) * i as f64 / steps as f64
         };
-        if let Some(reason) = authored_alpha_gate_at(chart, line_id, note_id, time) {
+        if let Some(reason) = authored_visibility_gate_at(chart, line_id, note_id, res, time, flow) {
             *hidden_reasons.entry(reason).or_default() += 1;
             hidden_at_target |= i == 0;
             hidden_span_start.get_or_insert(time);
@@ -629,6 +897,7 @@ fn note_plan(chart: &Chart, line_id: usize, note_id: usize, res: &Resource, prev
         note_geometry_at(chart, line_id, note_id, res, time, flow).map(|geometry| PreviewSample {
             anchor: geometry.anchor,
             visible: geometry_visible(geometry.quads),
+            authored_visible: authored_visibility_gate_at(chart, line_id, note_id, res, time, flow).is_none(),
         })
     })
 }
@@ -660,6 +929,7 @@ impl Chart {
                     note.time,
                     res.config.speed as f64,
                     NOTE_FLOW_SPEED_MIN,
+                    res.note_flow_speed,
                 );
                 let boundary_candidate = boundary_flow.map(|flow| audit_constant_candidate(
                     self,
@@ -670,6 +940,7 @@ impl Chart {
                     note.time,
                     res.config.speed as f64,
                     flow,
+                    res.note_flow_speed,
                 ));
                 let original_candidate = audit_constant_candidate(
                     self,
@@ -680,14 +951,17 @@ impl Chart {
                     note.time,
                     res.config.speed as f64,
                     res.note_flow_speed,
+                    res.note_flow_speed,
                 );
                 let authored_visibility = audit_authored_visibility(
                     self,
                     line_id,
                     note_id,
+                    res,
                     target,
                     note.time,
                     res.config.speed as f64,
+                    plan.flow(),
                 );
                 let no_bracket_probe = boundary_flow.is_none().then(|| {
                     let mut visible_count = 0_usize;

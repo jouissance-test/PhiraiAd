@@ -66,6 +66,16 @@ mod core {
     pub struct Chart {
         pub lines: Vec<Line>,
         pub settings: ChartSettings,
+        pub bpm_list: RefCell<BpmList>,
+    }
+    pub struct BpmList;
+    impl BpmList {
+        pub fn beat(&mut self, time: f64) -> f64 {
+            time * 2.
+        }
+        pub fn time_beats(&mut self, beats: f64) -> f64 {
+            beats / 2.
+        }
     }
     pub struct ChartSettings {
         pub hold_partial_cover: bool,
@@ -201,6 +211,7 @@ fn carrier_chart(line_alpha: f32) -> Chart {
             hold_partial_cover: false,
             pe_alpha_extension: true,
         },
+        bpm_list: RefCell::new(core::BpmList),
         lines: vec![core::Line {
             show_below: true,
             object: Object {
@@ -256,7 +267,7 @@ fn reversing_scroll_must_not_accept_a_single_target_boundary_contact() {
 }
 
 #[test]
-fn constant_candidate_may_inherit_but_not_amplify_authored_line_motion() {
+fn constant_candidate_cannot_expose_offscreen_authored_line_motion() {
     use phira_chart_play_tests::anim::Keyframe;
     let res = resource();
     let mut chart = carrier_chart(1.);
@@ -274,7 +285,30 @@ fn constant_candidate_may_inherit_but_not_amplify_authored_line_motion() {
         assert!(note_quad_at(&chart, 0, 0, &res, time, candidate).is_some_and(geometry_visible));
     }
     let plan = note_plan(&chart, 0, 0, &res, 0.45);
-    assert!(matches!(plan, PreviewPlan::Constant { .. }), "the candidate does not exceed Original's inherited jump: {plan:?}");
+    assert!(matches!(
+        plan,
+        PreviewPlan::Original {
+            reason: FallbackReason::MotionSpike,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn constant_candidate_may_inherit_motion_while_original_is_visible() {
+    let start = 9.25;
+    let plan = choose_plan(false, 1., start, 10., 1., |time, flow| {
+        let original = flow > 0.5;
+        Some(PreviewSample {
+            anchor: Point::new(if time >= 9.75 { 0.2 } else { 0. }, 0.),
+            // Original starts outside, enters well before the shared jump and
+            // remains visible. The candidate may inherit that authored jump
+            // because both Original samples around it are actually visible.
+            visible: !original || time >= 9.5,
+            authored_visible: true,
+        })
+    });
+    assert!(matches!(plan, PreviewPlan::Constant { flow, start: 9.25 } if flow <= 0.5), "{plan:?}");
 }
 
 #[test]
@@ -283,6 +317,7 @@ fn gate_only_preserves_authored_motion_spikes() {
         Some(PreviewSample {
             anchor: Point::new(if time < 9.75 { -0.4 } else { 0.4 }, 0.),
             visible: true,
+            authored_visible: true,
         })
     });
     assert!(matches!(plan, PreviewPlan::GateOnly { original_flow: 1., .. }));
@@ -299,6 +334,7 @@ fn constant_motion_guard_normalizes_chart_steps_to_real_time() {
                 Some(PreviewSample {
                     anchor: Point::new(if flow <= 0.5 { ((time - start) * real_velocity / rate) as f32 } else { 0. }, 0.),
                     visible: flow <= 0.5,
+                    authored_visible: true,
                 })
             });
             assert_eq!(plan.reason() == "motion_spike", rejected, "rate={rate}, velocity={real_velocity}, {plan:?}");
@@ -307,6 +343,22 @@ fn constant_motion_guard_normalizes_chart_steps_to_real_time() {
             }
         }
     }
+}
+
+#[test]
+fn constant_candidate_cannot_borrow_motion_budget_from_an_offscreen_original() {
+    let result = validate_constant_candidate(9.25, 10., 180, 1., 0.5, 1., &mut |time, flow| {
+        let after_jump = time >= 9.5;
+        Some(PreviewSample {
+            anchor: Point::new(if after_jump { if flow < 0.75 { 0.2 } else { 0.21 } } else { 0. }, 0.),
+            // The candidate exposes the jump, while Original keeps the same
+            // authored line motion outside the viewport. An invisible
+            // Original trajectory must not raise the candidate's speed limit.
+            visible: flow < 0.75,
+            authored_visible: true,
+        })
+    });
+    assert_eq!(result, Err(FallbackReason::MotionSpike));
 }
 
 #[test]
@@ -341,6 +393,7 @@ fn interval_failure_restores_original_flow_and_has_no_time_gate() {
         Some(PreviewSample {
             anchor: Point::origin(),
             visible: distance * flow <= 1.,
+            authored_visible: true,
         })
     });
     assert_eq!(
@@ -365,6 +418,7 @@ fn smaller_constant_candidate_can_rescue_a_failed_target_boundary_candidate() {
         Some(PreviewSample {
             anchor: Point::origin(),
             visible: flow <= limit,
+            authored_visible: true,
         })
     });
     assert!(
@@ -374,11 +428,43 @@ fn smaller_constant_candidate_can_rescue_a_failed_target_boundary_candidate() {
 }
 
 #[test]
+fn bounded_interior_probe_can_bridge_motion_and_visibility_failures() {
+    let start = 9.25;
+    let plan = choose_plan(false, 1., start, 10., 1., |time, flow| {
+        let low_flow_jump = flow < 0.4 && time >= 9.5;
+        Some(PreviewSample {
+            anchor: Point::new(if low_flow_jump { 1. } else { 0. }, 0.),
+            // The target boundary is near 0.8, but it leaves the viewport
+            // later. Minimum remains visible but creates a motion spike. A
+            // middle constant is both continuously visible and smooth.
+            visible: if time <= start { flow <= 0.8 } else { flow <= 0.7 },
+            authored_visible: true,
+        })
+    });
+    assert!(matches!(plan, PreviewPlan::Constant { flow, start: 9.25 } if (0.4..=0.7).contains(&flow)), "{plan:?}");
+}
+
+#[test]
+fn bounded_interior_probe_keeps_original_when_no_safe_band_exists() {
+    let start = 9.25;
+    let plan = choose_plan(false, 1., start, 10., 1., |time, flow| {
+        let low_flow_jump = flow <= 0.35 && time >= 9.5;
+        Some(PreviewSample {
+            anchor: Point::new(if low_flow_jump { 1. } else { 0. }, 0.),
+            visible: if time <= start { flow <= 0.8 } else { flow <= 0.35 },
+            authored_visible: true,
+        })
+    });
+    assert!(matches!(plan, PreviewPlan::Original { .. }), "{plan:?}");
+}
+
+#[test]
 fn monotone_approach_can_use_constant_flow_when_original_is_outside_at_target() {
     let plan = choose_plan(false, 1., 9., 10., 1., |time, flow| {
         Some(PreviewSample {
             anchor: Point::origin(),
             visible: (10. - time) * 2. * flow as f64 <= 1.,
+            authored_visible: true,
         })
     });
     assert!(matches!(plan, PreviewPlan::Constant { flow, start: 9. } if (flow - 0.5).abs() < 0.001));
@@ -394,6 +480,7 @@ fn validation_rejects_late_gap_and_caps_work_independent_of_duration() {
         Some(PreviewSample {
             anchor: Point::origin(),
             visible: true,
+            authored_visible: true,
         })
     });
     assert_eq!(plan.reason(), "validation_budget_exceeded");
@@ -403,6 +490,7 @@ fn validation_rejects_late_gap_and_caps_work_independent_of_duration() {
             Some(PreviewSample {
                 anchor: Point::origin(),
                 visible: !gap.contains(&time) && flow <= 3.,
+                authored_visible: true,
             })
         });
         assert!(
@@ -416,6 +504,190 @@ fn validation_rejects_late_gap_and_caps_work_independent_of_duration() {
             "{gap:?}: {plan:?}"
         );
     }
+}
+
+#[test]
+fn authored_target_hiding_falls_back_without_installing_a_gate() {
+    let plan = choose_plan(false, 1., 9.25, 10., 1., |_, _| {
+        Some(PreviewSample {
+            anchor: Point::origin(),
+            visible: true,
+            authored_visible: false,
+        })
+    });
+    assert_eq!(
+        plan,
+        PreviewPlan::Original {
+            original_flow: 1.,
+            reason: FallbackReason::AuthoredVisibility,
+        }
+    );
+    assert!(!plan.hides(false, 0.));
+}
+
+#[test]
+fn original_authored_hiding_skips_gate_only_but_can_use_a_safe_constant() {
+    let plan = choose_plan(false, 1., 9.25, 10., 1., |_, flow| {
+        Some(PreviewSample {
+            anchor: Point::origin(),
+            visible: flow <= 3.,
+            authored_visible: flow <= 0.5,
+        })
+    });
+    assert!(matches!(plan, PreviewPlan::Constant { flow, start: 9.25 } if (flow - 0.5).abs() < 0.01), "{plan:?}");
+}
+
+#[test]
+fn flow_dependent_authored_gate_can_be_solved_without_a_geometry_bracket() {
+    let plan = choose_plan(false, 1., 9.25, 10., 1., |_, flow| {
+        Some(PreviewSample {
+            anchor: Point::origin(),
+            visible: true,
+            authored_visible: flow <= 0.5,
+        })
+    });
+    assert!(matches!(plan, PreviewPlan::Constant { flow, start: 9.25 } if (flow - 0.5).abs() < 0.01), "{plan:?}");
+}
+
+#[test]
+fn fully_visible_target_without_a_bracket_can_refine_a_safe_constant() {
+    let plan = choose_plan(false, 1., 9.25, 10., 1., |time, flow| {
+        Some(PreviewSample {
+            anchor: Point::origin(),
+            // Every flow is visible at the target, so target-only bracketing
+            // cannot find an edge. During the approach, however, a slower
+            // constant remains visible while Original leaves the viewport.
+            visible: time <= 9.25 || flow <= 0.5,
+            authored_visible: true,
+        })
+    });
+    assert!(matches!(plan, PreviewPlan::Constant { flow, start: 9.25 } if (flow - 0.5).abs() < 0.01), "{plan:?}");
+}
+
+#[test]
+fn internal_target_visibility_island_can_supply_a_safe_constant() {
+    let plan = choose_plan(false, 1., 9.25, 10., 1., |_, flow| {
+        Some(PreviewSample {
+            anchor: Point::origin(),
+            // Minimum and maximum are both outside, but the Note crosses the
+            // viewport for an internal range of constant flows.
+            visible: (0.4..=0.6).contains(&flow),
+            authored_visible: true,
+        })
+    });
+    assert!(matches!(plan, PreviewPlan::Constant { flow, start: 9.25 } if (0.4..=0.61).contains(&flow)), "{plan:?}");
+}
+
+#[test]
+fn internal_target_visibility_island_still_requires_a_safe_full_interval() {
+    let plan = choose_plan(false, 1., 9.25, 10., 1., |time, flow| {
+        Some(PreviewSample {
+            anchor: Point::origin(),
+            visible: time <= 9.25 && (0.4..=0.6).contains(&flow),
+            authored_visible: true,
+        })
+    });
+    assert!(matches!(plan, PreviewPlan::Original { .. }), "{plan:?}");
+}
+
+#[test]
+fn mixed_candidate_failures_do_not_overstate_authored_visibility() {
+    assert_eq!(
+        combined_candidate_failure(FallbackReason::AuthoredVisibility, FallbackReason::VisibilityGap),
+        FallbackReason::VisibilityGap
+    );
+    assert_eq!(
+        combined_candidate_failure(FallbackReason::AuthoredVisibility, FallbackReason::MotionSpike),
+        FallbackReason::MotionSpike
+    );
+    assert_eq!(
+        combined_candidate_failure(FallbackReason::AuthoredVisibility, FallbackReason::AuthoredVisibility),
+        FallbackReason::AuthoredVisibility
+    );
+}
+
+#[test]
+fn shortened_partial_cover_uses_each_candidate_flow() {
+    use phira_chart_play_tests::anim::Keyframe;
+    let mut res = resource();
+    res.config.shorten_holds = true;
+    let mut chart = carrier_chart(1.);
+    chart.settings.hold_partial_cover = true;
+    chart.lines[0].show_below = false;
+    chart.lines[0].notes[0].kind = NoteKind::Hold {
+        end_time: 11.,
+        end_height: 4.,
+    };
+    chart.lines[0].height = core::AnimFloat::new(vec![Keyframe::new(9.55, 4.1, 0), Keyframe::new(10.9, 4., 0)]);
+    assert_eq!(authored_visibility_gate_at(&chart, 0, 0, &res, 9.55, 1.), Some("cover"));
+    assert_eq!(authored_visibility_gate_at(&chart, 0, 0, &res, 9.55, 0.1), None);
+}
+
+#[test]
+fn authored_negative_alpha_modes_match_renderer_boundaries() {
+    let res = resource();
+    let mut chart = carrier_chart(-0.1);
+    chart.settings.pe_alpha_extension = false;
+    assert_eq!(authored_visibility_gate_at(&chart, 0, 0, &res, 9.55, 1.), Some("negative_line_alpha_disabled"));
+
+    chart.settings.pe_alpha_extension = true;
+    chart.lines[0].object.alpha = core::AnimFloat::fixed(-1.);
+    assert_eq!(authored_visibility_gate_at(&chart, 0, 0, &res, 9.55, 1.), Some("negative_line_alpha_hidden"));
+
+    chart.lines[0].object.alpha = core::AnimFloat::fixed(-2.);
+    chart.lines[0].notes[0].height = -0.1;
+    assert_eq!(authored_visibility_gate_at(&chart, 0, 0, &res, 9.55, 1.), Some("cover"));
+    chart.lines[0].notes[0].height = 4.;
+
+    chart.lines[0].object.alpha = core::AnimFloat::fixed(-100.);
+    assert_eq!(authored_visibility_gate_at(&chart, 0, 0, &res, 9.55, 1.), Some("appearance_window"));
+    assert_eq!(authored_visibility_gate_at(&chart, 0, 0, &res, 10., 1.), None);
+
+    chart.lines[0].object.alpha = core::AnimFloat::fixed(-999.);
+    assert_eq!(authored_visibility_gate_at(&chart, 0, 0, &res, 9.55, 1.), None);
+    chart.lines[0].object.alpha = core::AnimFloat::fixed(-1000.);
+    assert_eq!(authored_visibility_gate_at(&chart, 0, 0, &res, 9.55, 1.), None);
+}
+
+#[test]
+fn authored_note_and_control_alpha_are_target_gates() {
+    let res = resource();
+    let mut chart = carrier_chart(1.);
+    chart.lines[0].notes[0].object.alpha = core::AnimFloat::fixed(0.);
+    assert_eq!(authored_visibility_gate_at(&chart, 0, 0, &res, 9.55, 1.), Some("note_alpha"));
+    chart.lines[0].notes[0].object.alpha = core::AnimFloat::fixed(0.001);
+    chart.lines[0].ctrl_obj.borrow_mut().alpha = core::AnimFloat::fixed(-0.1);
+    assert_eq!(authored_visibility_gate_at(&chart, 0, 0, &res, 9.55, 1.), Some("control_alpha"));
+}
+
+#[test]
+fn authored_hiding_after_a_visible_target_is_preserved_not_reclassified_as_solver_failure() {
+    let plan = choose_plan(false, 1., 9.25, 10., 1., |time, _| {
+        let authored_visible = !(9.5..9.6).contains(&time);
+        Some(PreviewSample {
+            anchor: Point::origin(),
+            // The renderer deliberately hides this interval, so travel
+            // geometry outside the viewport during the same interval must not
+            // turn an otherwise valid plan into a solver failure.
+            visible: authored_visible,
+            authored_visible,
+        })
+    });
+    assert!(matches!(plan, PreviewPlan::GateOnly { original_flow: 1., start: 9.25 }));
+}
+
+#[test]
+fn constant_candidate_cannot_introduce_a_new_authored_gap_after_target() {
+    let result = validate_constant_candidate(9.25, 10., 180, 1., 0.5, 1., &mut |time, flow| {
+        Some(PreviewSample {
+            anchor: Point::origin(),
+            visible: true,
+            // Model a flow-dependent shortened-Hold cover: the candidate is
+            // visible at target but hides later, while Original stays visible.
+            authored_visible: flow > 0.5 || time < 9.5,
+        })
+    });
+    assert_eq!(result, Err(FallbackReason::VisibilityGap));
 }
 
 #[test]
@@ -474,17 +746,19 @@ fn fake_and_invalid_targets_do_not_run_a_solver_or_install_a_gate() {
 }
 
 #[test]
-fn renderer_owned_cover_and_negative_alpha_do_not_remove_travel_geometry() {
+fn renderer_owned_cover_and_negative_alpha_keep_geometry_but_force_safe_fallback() {
     let res = resource();
     let mut chart = carrier_chart(1.);
     chart.lines[0].notes[0].height = -0.1;
     chart.lines[0].show_below = false;
     assert!(note_quad_at(&chart, 0, 0, &res, 9.55, 1.).is_some());
+    assert_eq!(note_plan(&chart, 0, 0, &res, 0.45).reason(), "authored_visibility_at_target");
     chart.lines[0].show_below = true;
     chart.lines[0].object.alpha = core::AnimFloat::fixed(-1.);
     assert!(note_quad_at(&chart, 0, 0, &res, 9.55, 1.).is_some());
+    assert_eq!(note_plan(&chart, 0, 0, &res, 0.45).reason(), "authored_visibility_at_target");
     chart.lines[0].object.alpha = core::AnimFloat::fixed(-100.);
-    assert!(!matches!(note_plan(&chart, 0, 0, &res, 0.45), PreviewPlan::Original { .. }));
+    assert_eq!(note_plan(&chart, 0, 0, &res, 0.45).reason(), "authored_visibility_at_target");
 }
 
 #[test]

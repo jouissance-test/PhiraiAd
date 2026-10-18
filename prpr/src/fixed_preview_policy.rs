@@ -21,6 +21,7 @@ pub enum FallbackReason {
     NoBracket,
     VisibilityGap,
     MotionSpike,
+    AuthoredVisibility,
 }
 
 impl FallbackReason {
@@ -33,6 +34,7 @@ impl FallbackReason {
             Self::NoBracket => "no_valid_bracket",
             Self::VisibilityGap => "visibility_interval_rejected",
             Self::MotionSpike => "motion_spike",
+            Self::AuthoredVisibility => "authored_visibility_at_target",
         }
     }
 }
