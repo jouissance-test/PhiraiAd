@@ -1,17 +1,20 @@
 //! Real slider, button and touch-consumption code with recording graphics/input adapters.
 #![allow(dead_code)]
-use std::{cell::RefCell,collections::HashMap,ops::Range};
+use std::{cell::{Cell,RefCell},collections::HashMap,ops::Range};
 use phira_chart_play_tests::{practice_speed,practice_view};
 thread_local! {
     static STATE:RefCell<HashMap<String,Option<u64>>>=RefCell::new(HashMap::new());
     static REQUEST:RefCell<Option<(String,String)>>=const{RefCell::new(None)};
+    static REAL_TIME:Cell<f64>=const{Cell::new(0.)};
 }
+fn get_time()->f64{REAL_TIME.with(Cell::get)}
 #[derive(Clone,Copy,Debug)]struct Vec2{x:f32,y:f32}
 #[derive(Clone,Copy,Debug)]struct Rect{x:f32,y:f32,w:f32,h:f32}
 impl Rect {
     fn new(x:f32,y:f32,w:f32,h:f32)->Self{Self{x,y,w,h}}
     fn feather(self,d:f32)->Self{Self::new(self.x-d,self.y-d,self.w+2.*d,self.h+2.*d)}
     fn right(self)->f32{self.x+self.w}
+    fn bottom(self)->f32{self.y+self.h}
     fn rounded(self,_:f32)->Self{self}
     fn center(self)->Vec2{Vec2{x:self.x+self.w/2.,y:self.y+self.h/2.}}
     fn contains(self,p:Vec2)->bool{p.x>=self.x&&p.x<=self.x+self.w&&p.y>=self.y&&p.y<=self.y+self.h}
@@ -43,9 +46,56 @@ impl Text<'_>{
     fn draw(self)->Rect{Rect::new(self.x,self.y,(self.count as f32*self.size*0.06).min(self.width),self.size*0.1)}
 }
 include!(concat!(env!("OUT_DIR"),"/practice_slider.rs"));
+fn fixed_preview_frame(value:&mut f32,time:f64,phase:TouchPhase)->Ui {
+    REAL_TIME.with(|clock|clock.set(time));
+    let mut ui=Ui{touches:Some(vec![Touch{id:71,position:Vec2{x:0.58,y:0.115},phase}]),..Default::default()};
+    ui.practice_speed_slider("fixed_preview_time","Preview",0.1..0.75,0.001,value,Some(0.4));
+    ui
+}
 fn frame(value:&mut f32,id:&str,x:f32,y:f32,phase:TouchPhase)->Ui {
     let mut ui=Ui{touches:Some(vec![Touch{id:7,position:Vec2{x,y},phase}]),..Default::default()};
     ui.practice_speed_slider(id,"Speed",0.05..10.,0.05,value,Some(0.46));ui
+}
+#[test]
+fn fixed_preview_short_press_changes_one_step_and_long_press_repeats_then_stops(){
+    let mut value=0.45;
+    fixed_preview_frame(&mut value,20.0,TouchPhase::Started);
+    assert_eq!(value,0.45);
+    fixed_preview_frame(&mut value,20.1,TouchPhase::Ended);
+    assert!((value-0.451).abs()<1e-6);
+
+    fixed_preview_frame(&mut value,30.0,TouchPhase::Started);
+    fixed_preview_frame(&mut value,30.34,TouchPhase::Stationary);
+    assert!((value-0.451).abs()<1e-6);
+    fixed_preview_frame(&mut value,30.35,TouchPhase::Stationary);
+    assert!((value-0.452).abs()<1e-6);
+    fixed_preview_frame(&mut value,30.75,TouchPhase::Stationary);
+    let early_steps=value-0.452;
+    fixed_preview_frame(&mut value,31.15,TouchPhase::Stationary);
+    let before_late_window=value;
+    fixed_preview_frame(&mut value,31.55,TouchPhase::Stationary);
+    assert!(value-before_late_window>early_steps);
+    let released=value;
+    fixed_preview_frame(&mut value,31.56,TouchPhase::Ended);
+    assert_eq!(value,released);
+    fixed_preview_frame(&mut value,32.0,TouchPhase::Moved);
+    assert_eq!(value,released);
+}
+
+#[test]
+fn other_practice_value_buttons_remain_single_step_after_a_long_hold(){
+    let mut value=100.0;
+    let plus=Rect::new(0.54,0.075,0.08,0.08).center();
+    for (time,phase) in [(40.0,TouchPhase::Started),(41.0,TouchPhase::Stationary)] {
+        REAL_TIME.with(|clock|clock.set(time));
+        let mut ui=Ui{touches:Some(vec![Touch{id:72,position:plus,phase}]),..Default::default()};
+        ui.practice_value_slider("exercise_view_scale","Scale",practice_view::SCALE,&mut value,Some(0.4));
+    }
+    assert_eq!(value,100.0);
+    REAL_TIME.with(|clock|clock.set(41.1));
+    let mut ui=Ui{touches:Some(vec![Touch{id:72,position:plus,phase:TouchPhase::Ended}]),..Default::default()};
+    ui.practice_value_slider("exercise_view_scale","Scale",practice_view::SCALE,&mut value,Some(0.4));
+    assert_eq!(value,101.0);
 }
 #[test]
 fn dragging_visits_both_extremes_and_exact_midpoint(){
@@ -140,5 +190,50 @@ fn coordinate_slider_endpoints_and_center() {
         ui.practice_value_slider("exercise_view_x", "X", practice_view::CENTER, &mut value, Some(0.4));
         assert_eq!(value, expected);
         Ui::clear_practice_speed_drag();
+    }
+}
+
+#[test]
+fn fixed_preview_slider_uses_the_whole_short_range_monotonically() {
+    use phira_chart_play_tests::config::{FIXED_PREVIEW_TIME_MIN, FIXED_PREVIEW_TIME_MAX, FIXED_PREVIEW_TIME_STEP};
+    let mut value = FIXED_PREVIEW_TIME_MIN;
+    let mut previous = value;
+    for i in 0..=20 {
+        let position = i as f32 / 20.;
+        let mut ui = Ui {
+            touches: Some(vec![Touch { id: 11, position: Vec2 { x: 0.4 * position, y: 0.115 }, phase: TouchPhase::Started }]),
+            ..Default::default()
+        };
+        ui.practice_speed_slider("fixed_preview_time", "Preview", FIXED_PREVIEW_TIME_MIN..FIXED_PREVIEW_TIME_MAX, FIXED_PREVIEW_TIME_STEP, &mut value, Some(0.4));
+        let expected = FIXED_PREVIEW_TIME_MIN + (FIXED_PREVIEW_TIME_MAX - FIXED_PREVIEW_TIME_MIN) * position;
+        assert!((value - expected).abs() <= FIXED_PREVIEW_TIME_STEP, "position={position}, value={value}, expected={expected}");
+        assert!(value >= previous);
+        // The rendered knob must match the touched coordinate, including both ends.
+        assert!((ui.circles[0].0 - 0.4 * position).abs() < 0.001);
+        previous = value;
+        Ui::clear_practice_speed_drag();
+    }
+    assert_eq!(value, FIXED_PREVIEW_TIME_MAX);
+}
+
+#[test]
+fn checked_box_has_an_explicit_check_mark() {
+    let mut ui = Ui::default();
+    let mut checked = true;
+    ui.checkbox_with_id("fixed_preview_enabled", "Fixed Preview", &mut checked);
+    assert!(ui.texts.iter().any(|text| text == "✓"));
+}
+
+#[test]
+fn fixed_preview_panel_leaves_the_timeline_text_column_clear() {
+    let (left, right) = practice_view::fixed_preview_panel_horizontal_bounds(true);
+    assert!(left >= -1.0, "panel must remain on-screen: {left}");
+    assert!(right <= -0.5, "panel intrudes into the centered timeline labels: {right}");
+    let (top, bottom) = practice_view::fixed_preview_panel_vertical_bounds(true);
+    for (screen_height, viewport_width) in [(1080., 1920.), (1080., 2400.)] {
+        let aspect = viewport_width / screen_height;
+        let timeline_bottom = practice_view::timeline_position(screen_height, viewport_width) + 0.06;
+        assert!(top >= timeline_bottom + 0.02, "panel overlaps the timeline bar at {aspect}: {top} < {timeline_bottom}");
+        assert!(bottom <= 1. / aspect - 0.005, "panel leaves the viewport at {aspect}: {bottom}");
     }
 }

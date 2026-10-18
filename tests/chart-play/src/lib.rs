@@ -215,6 +215,54 @@ mod persistence_tests {
     }
 }
 
+pub mod noise_area {
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Clone, Debug, Default, Deserialize, Serialize)]
+    #[serde(default, rename_all = "camelCase")]
+    pub struct NoiseAreaConfig {
+        pub enabled: bool,
+        pub precise_edges: bool,
+        pub remove_distortion: bool,
+        pub music_unaffected: bool,
+        pub low_performance: bool,
+    }
+}
+
+pub mod custom_judgement {
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+    #[serde(default, rename_all = "camelCase")]
+    pub struct Scheme {
+        pub name: String,
+        pub counts_local_score: bool,
+        pub boundaries_ms: Vec<f64>,
+    }
+
+    impl Default for Scheme {
+        fn default() -> Self {
+            Self {
+                name: "test".into(),
+                counts_local_score: false,
+                boundaries_ms: vec![180., 80., -80., -165.],
+            }
+        }
+    }
+
+    #[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
+    #[serde(default, rename_all = "camelCase")]
+    pub struct CustomJudgementConfig {
+        pub current: Scheme,
+    }
+
+    impl CustomJudgementConfig {
+        pub fn effective(&self) -> &Scheme {
+            &self.current
+        }
+    }
+}
+
 #[path = "../../../prpr/src/config.rs"]
 pub mod config;
 
@@ -550,3 +598,6 @@ fn global_flip_default_and_conversion_settings_roundtrip() {
 
 #[path = "../../../prpr/src/practice_view.rs"]
 pub mod practice_view;
+
+#[path = "../../../prpr/src/fixed_preview_policy.rs"]
+pub mod fixed_preview_policy;

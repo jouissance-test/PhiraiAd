@@ -1,5 +1,15 @@
 // Compile the actual settings groups against recording UI adapters in settings_ui.rs.
 fn main() {
+    // Run the production sampler/solver with headless shape adapters.
+    let path = "../../prpr/src/fixed_preview.rs";
+    println!("cargo:rerun-if-changed={path}");
+    let source = std::fs::read_to_string(path).unwrap();
+    let geometry = &source[source
+        .find("#[inline]\nfn cross(")
+        .or_else(|| source.find("#[inline]\r\nfn cross("))
+        .unwrap()..source.find("impl Chart {").unwrap()];
+    let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+    std::fs::write(out.join("fixed_preview_geometry.rs"), geometry).unwrap();
     let path = "../../phira/src/page/best_board_export.rs";
     println!("cargo:rerun-if-changed={path}");
     let source = std::fs::read_to_string(path).unwrap();
@@ -19,7 +29,18 @@ fn main() {
     let slider = &source[source.find("    pub fn practice_speed_slider(").unwrap()..source.find("    pub fn hgrids(").unwrap()];
     let clicked = &source[source.find("    fn clicked(").unwrap()..source.find("    pub fn accent(").unwrap()];
     let button = &source[source.find("    pub fn button(").unwrap()..source.find("    pub fn checkbox(").unwrap()];
-    std::fs::write(out.join("practice_slider.rs"), format!("impl Ui {{\n{slider}\n{clicked}\n{button}\n}}\n")).unwrap();
+    let checkbox = &source[source.find("    pub fn checkbox(").unwrap()..source.find("    pub fn input<").unwrap()];
+    let hold_state_start = source.find("struct HoldRepeatButton {").unwrap();
+    let hold_state_start = source[..hold_state_start].rfind("#[derive(Clone, Copy, Default)]").unwrap();
+    let hold_state_end = source[hold_state_start..].find("pub struct InputParams").unwrap() + hold_state_start;
+    let hold_state = &source[hold_state_start..hold_state_end];
+    std::fs::write(
+        out.join("practice_slider.rs"),
+        format!(
+            "{hold_state}\nthread_local! {{ static HOLD_REPEAT_STATE: RefCell<HashMap<String, HoldRepeatButton>> = RefCell::new(HashMap::new()); }}\nimpl Ui {{\n{slider}\n{clicked}\n{button}\n{checkbox}\n}}\n"
+        ),
+    )
+    .unwrap();
     let path = "../../prpr/src/ui/chart_play_editor.rs";
     println!("cargo:rerun-if-changed={path}");
     let code = std::fs::read_to_string(path).unwrap();
@@ -53,16 +74,32 @@ fn main() {
     let path = "../../prpr/src/core/line.rs";
     println!("cargo:rerun-if-changed={path}");
     let code = std::fs::read_to_string(path).unwrap();
-    let code = &code[code.find("#[derive(Clone)]\npub struct JudgeLineCache").unwrap()..code.find("pub struct JudgeLine {").unwrap()];
+    let cache = code.find("pub struct JudgeLineCache").unwrap();
+    let cache = code[..cache].rfind("#[derive(Clone)]").unwrap();
+    let code = &code[cache..code.find("pub struct JudgeLine {").unwrap()];
     std::fs::write(out.join("line_cache.rs"), code).unwrap();
     // Exercise the production end-of-run record gate, not a copy of its policy.
     let path = "../../prpr/src/scene/game.rs";
     println!("cargo:rerun-if-changed={path}");
     let source = std::fs::read_to_string(path).unwrap();
     let record = &source[source.find("#[derive(Clone, Debug, Serialize, Deserialize)]").unwrap()..source.find("fn fmt_time(").unwrap()];
-    let mode = &source[source.find("#[derive(PartialEq, Eq)]").unwrap()..source.find("#[derive(Clone)]\nenum State").unwrap()];
+    let state = source.find("enum State").unwrap();
+    let state = source[..state].rfind("#[derive(Clone)]").unwrap();
+    let mode = &source[source.find("#[derive(PartialEq, Eq)]").unwrap()..state];
     let pause = &source[source.find("    /// All button/automatic pauses").unwrap()..source.find("    fn sync_auto_flip(").unwrap()];
     std::fs::write(out.join("pause_resume.rs"), format!("impl GameScene {{ {pause} }}")).unwrap();
+    // Exercise the production fixed-preview cache key and synchronization path
+    // with a recording Chart adapter in fixed_preview_hot_reload.rs.
+    let key_start = source
+        .find("#[derive(Clone, Copy, Debug, PartialEq)]\nstruct FixedPreviewKey {")
+        .or_else(|| source.find("#[derive(Clone, Copy, Debug, PartialEq)]\r\nstruct FixedPreviewKey {"))
+        .unwrap();
+    let key_end = source[key_start..].find("\npub struct GameScene {").unwrap() + key_start;
+    let key = &source[key_start..key_end];
+    let sync_start = source.find("    fn fixed_preview_supported(&self) -> bool {").unwrap();
+    let sync_end = source[sync_start..].find("    fn report_mode(").unwrap() + sync_start;
+    let sync = &source[sync_start..sync_end];
+    std::fs::write(out.join("fixed_preview_hot_reload.rs"), format!("{key}\nimpl GameScene {{ {sync} }}")).unwrap();
     let begin = source.find("                    let result = self.judge.result();").unwrap();
     let gate = &source[begin..source[begin..].find("                    self.next_scene = match self.mode").unwrap() + begin];
     std::fs::write(
